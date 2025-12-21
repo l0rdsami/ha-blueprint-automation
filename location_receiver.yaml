@@ -1,0 +1,24 @@
+blueprint:
+  name: Location Webhook Receiver
+  description: Listens for GPS and accuracy data to update a local device_tracker.
+  domain: automation
+  input:
+    webhook_id:
+      name: Webhook ID
+      description: The unique secret ID used in the URL.
+
+trigger:
+  - platform: webhook
+    webhook_id: !input webhook_id
+    allowed_methods: [POST]
+    local_only: false
+
+action:
+  - service: device_tracker.see
+    data:
+      dev_id: "{{ trigger.json.dev_id }}"
+      gps:
+        - "{{ trigger.json.lat }}"
+        - "{{ trigger.json.long }}"
+      gps_accuracy: "{{ trigger.json.acc }}"
+mode: parallel

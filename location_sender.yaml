@@ -1,0 +1,31 @@
+blueprint:
+  name: Location Webhook Sender (Accuracy Support)
+  description: Pushes Person or Tracker location with accuracy to a remote HA instance.
+  domain: automation
+  input:
+    source_entity:
+      name: Person or Tracker
+      selector:
+        entity:
+          domain: [person, device_tracker]
+    webhook_url:
+      name: Remote Webhook URL
+      description: The templated URL (https://INSTANCE_URL/api/webhook/ID)
+    remote_dev_id:
+      name: Remote Device ID
+      description: The name the device will have on the receiving instance.
+      default: shared_location
+
+trigger:
+  - platform: state
+    entity_id: !input source_entity
+
+action:
+  - service: rest_command.blueprint_webhook_sender
+    data:
+      url: !input webhook_url
+      lat: "{{ state_attr(trigger.entity_id, 'latitude') }}"
+      long: "{{ state_attr(trigger.entity_id, 'longitude') }}"
+      acc: "{{ state_attr(trigger.entity_id, 'gps_accuracy') | default(0) }}"
+      dev_id: !input remote_dev_id
+mode: restart

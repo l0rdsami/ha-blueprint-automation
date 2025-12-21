@@ -1,0 +1,64 @@
+blueprint:
+  name: Bluetooth Presence
+  description: Track the location of something connected to people vie bluetooth
+  domain: automation
+  input:
+    people:
+      name: People
+      selector:
+        entity:
+          filter:
+            domain: person
+        multiple: true
+    mac:
+      name: MAC Adress
+      selector:
+        text: null
+mode: restart
+
+variables:
+  people: !input people
+  mac: !input mac
+
+triggers:
+  - trigger: template
+    value_template:
+
+
+triggers:
+  - trigger: state
+    entity_id: !input light_entity
+    to: null
+    id: light
+  - trigger: state
+    entity_id: !input switch_entity
+    to: null
+    id: switch
+
+conditions:
+  - alias: "States need to be different"
+    condition: template
+    value_template: "{{ states(light_entity) != states(switch_entity) }}"
+  - condition: !input conditions
+
+actions:
+  - alias: "Distinguish Target and Trigger"
+    choose:
+    - conditions:
+        - condition: trigger
+          id: light
+      sequence:
+        - alias: "Toggle switch"
+          service: switch.toggle
+          target:
+            entity_id: !input switch_entity
+    - conditions:
+        - condition: trigger
+          id: switch
+      sequence:
+        - action: light.toggle
+          metadata: {}
+          data:
+            transition: !input delay
+          target:
+            entity_id: !input light_entity

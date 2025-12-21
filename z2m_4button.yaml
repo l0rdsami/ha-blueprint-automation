@@ -1,0 +1,136 @@
+blueprint:
+  name: Zigbee2MQTT - Tuya 4-Button Scene Switch
+  description: Automate your Tuya 4-Button Scene Switch via Zigbee2MQTT.
+  domain: automation
+  input:
+    mqtt:
+      name: MQTT Topics to listen to
+      selector:
+        trigger:
+      default:
+        - platform: mqtt
+          topic: "zigbee2mqtt/xxx/action"
+    button_one:
+      name: Button 1
+      description: Actions for Button 1 (upper-left)
+      collapsed: true
+      input:
+        button_one_short_press:
+          name: Single Press
+          default: []
+          selector:
+            action: {}
+        button_one_double_press:
+          name: Double Press
+          default: []
+          selector:
+            action: {}
+        button_one_long_press:
+          name: Long Press
+          default: []
+          selector:
+            action: {}
+    button_two:
+      name: Button 2
+      description: Actions for Button 2 (lower-left)
+      collapsed: true
+      input:
+        button_two_short_press:
+          name: Single Press
+          default: []
+          selector:
+            action: {}
+        button_two_double_press:
+          name: Double Press
+          default: []
+          selector:
+            action: {}
+        button_two_long_press:
+          name: Long Press
+          default: []
+          selector:
+            action: {}
+    button_three:
+      name: Button 3
+      description: Actions for Button 1 (upper-right)
+      collapsed: true
+      input:
+        button_three_short_press:
+          name: Single Press
+          default: []
+          selector:
+            action: {}
+        button_three_double_press:
+          name: Double Press
+          default: []
+          selector:
+            action: {}
+        button_three_long_press:
+          name: Long Press
+          default: []
+          selector:
+            action: {}
+    button_four:
+      name: Button 4
+      description: Actions for Button 1 (lower-right)
+      collapsed: true
+      input:
+        button_four_short_press:
+          name: Single Press
+          default: []
+          selector:
+            action: {}
+        button_four_double_press:
+          name: Double Press
+          default: []
+          selector:
+            action: {}
+        button_four_long_press:
+          name: Long Press
+          default: []
+          selector:
+            action: {}
+mode: parallel
+max_exceeded: silent
+trigger:
+  triggers: !input mqtt
+action:
+  - variables:
+      command: "{{ trigger.payload }}"
+  - choose:
+      - conditions:
+          - "{{ command == '1_single' }}"
+        sequence: !input button_one_short_press
+      - conditions:
+          - "{{ command == '2_single' }}"
+        sequence: !input button_two_short_press
+      - conditions:
+          - "{{ command == '3_single' }}"
+        sequence: !input button_three_short_press
+      - conditions:
+          - "{{ command == '4_single' }}"
+        sequence: !input button_four_short_press
+      - conditions:
+          - "{{ command == '1_double' }}"
+        sequence: !input button_one_double_press
+      - conditions:
+          - "{{ command == '2_double' }}"
+        sequence: !input button_two_double_press
+      - conditions:
+          - "{{ command == '3_double' }}"
+        sequence: !input button_three_double_press
+      - conditions:
+          - "{{ command == '4_double' }}"
+        sequence: !input button_four_double_press
+      - conditions:
+          - "{{ command == '1_hold' }}"
+        sequence: !input button_one_long_press
+      - conditions:
+          - "{{ command == '2_hold' }}"
+        sequence: !input button_two_long_press
+      - conditions:
+          - "{{ command == '3_hold' }}"
+        sequence: !input button_three_long_press
+      - conditions:
+          - "{{ command == '4_hold' }}"
+        sequence: !input button_four_long_press

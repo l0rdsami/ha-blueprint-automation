@@ -1,0 +1,118 @@
+blueprint:
+  name: Presence-activated Light
+  description: Turn on a light when presence is detected.
+  homeassistant:
+    min_version: 2023.8.0
+  domain: automation
+  input:
+    presence_entity:
+      name: Presence Sensor
+      description: Presence sensor device
+      selector:
+        entity:
+          filter:
+            domain:
+            - binary_sensor
+            device_class:
+            - occupancy
+          multiple: false
+    light_target:
+      name: Light
+      description: Light device
+      selector:
+        target:
+          entity:
+          - domain:
+            - light
+    no_motion_wait:
+      name: Wait time
+      description: Time to leave the light on after last motion is detected.
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 3600.0
+          unit_of_measurement: seconds
+          mode: slider
+          step: 1.0
+    off_transition:
+      name: Transition time
+      description: Time in seconds of transition
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 60.0
+          unit_of_measurement: seconds
+          mode: slider
+          step: 1.0
+    light_sensor:
+      name: Light sensor
+      description: Light sensor to read from
+      default: []
+      selector:
+        entity:
+          filter:
+            domain:
+            - sensor
+            device_class:
+            - illuminance
+          multiple: false
+    light_threshold:
+      name: Light threshold
+      description: Light sensor‘s lower threshold
+      default: 200
+      selector:
+        number:
+          min: 0.0
+          max: 3000
+          mode: slider
+          step: 1.0
+    additional_conditions:
+      name: Additional conditions
+      description: |
+        Extra conditions you may want to add to this automation 
+        (Example: Home occupied, TV on, etc)
+      default: []
+      selector:
+        condition:
+trigger:
+  platform: state
+  entity_id: !input presence_entity
+  from: 'off'
+  to: 'on'
+condition:
+- condition: numeric_state
+  entity_id: !input light_sensor
+  below: !input light_threshold
+- condition: !input additional_conditions
+
+action:
+- alias: Turn on the light
+  action: light.turn_on
+  metadata: {}
+  data:
+    transition: !input off_transition
+  target: !input light_target
+- alias: Wait until light transitioned
+  delay: !input off_transition
+- alias: Wait until there is no motion from device
+  wait_for_trigger:
+    platform: state
+    entity_id: !input presence_entity
+    from: 'on'
+    to: 'off'
+    for:
+      seconds: !input no_motion_wait
+- alias: Wait the number of seconds that has been set
+  delay: !input no_motion_wait
+- alias: Turn off the light
+  service: light.turn_off
+  target: !input light_target
+  data:
+    transition: !input off_transition
+- alias: Wait until light transitioned
+  delay: !input off_transition
+
+mode: restart
+max_exceeded: silent

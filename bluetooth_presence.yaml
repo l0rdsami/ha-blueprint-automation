@@ -4,6 +4,7 @@ blueprint:
     Assigns device_tracker locations based on Bluetooth MAC connections to
     person source devices. Person priority is determined by input order.
     Each MAC maps to its own target device_tracker.
+    Triggers on state changes for efficient, real-time updates.
   domain: automation
 
   input:
@@ -27,11 +28,18 @@ blueprint:
       selector:
         object:
 
-mode: restart
+mode: single
+max_exceeded: silent
 
 trigger:
-  - platform: time_pattern
-    seconds: "/10"
+  - platform: state
+    entity_id: !input persons
+    attribute: latitude
+  - platform: state
+    entity_id: !input persons
+    attribute: longitude
+  - platform: homeassistant
+    event: start
 
 variables:
   people: !input persons
@@ -61,24 +69,25 @@ variables:
       {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
     {%- endfor -%}
 
-condition:
-  - condition: template
-    value_template: "{{ match | length > 0 }}"
-
 action:
-  - variables:
-      person: "{{ match.split('|')[0] }}"
-      mac: "{{ match.split('|')[1] }}"
-      target: "{{ match.split('|')[2] }}"
-      lat: "{{ state_attr(person, 'latitude') }}"
-      lon: "{{ state_attr(person, 'longitude') }}"
-      acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ match | length > 0 }}"
+        sequence:
+          - variables:
+              person: "{{ match.split('|')[0] }}"
+              mac: "{{ match.split('|')[1] }}"
+              target: "{{ match.split('|')[2] }}"
+              lat: "{{ state_attr(person, 'latitude') }}"
+              lon: "{{ state_attr(person, 'longitude') }}"
+              acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
 
-  - service: device_tracker.see
-    data:
-      dev_id: "{{ target.split('.')[-1] }}"
-      gps:
-        - "{{ lat }}"
-        - "{{ lon }}"
-      gps_accuracy: "{{ acc }}"
-      source_type: gps
+          - service: device_tracker.see
+            data:
+              dev_id: "{{ target.split('.')[-1] }}"
+              gps:
+                - "{{ lat }}"
+                - "{{ lon }}"
+              gps_accuracy: "{{ acc }}"
+              source_type: gps

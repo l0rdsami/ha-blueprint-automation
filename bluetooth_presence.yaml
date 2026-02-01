@@ -21,11 +21,11 @@ blueprint:
       description: >
         Bluetooth connection sensors to monitor (sensor.xxx_bluetooth_connection).
         Find these under your person's source device entities.
+        At least one sensor must be specified.
       selector:
         entity:
           domain: sensor
           multiple: true
-      default: []
 
     bluetooth_macs:
       name: Bluetooth MAC Addresses
@@ -44,6 +44,10 @@ mode: restart
 trigger:
   - platform: state
     entity_id: !input persons
+    attribute: latitude
+  - platform: state
+    entity_id: !input persons
+    attribute: longitude
   - platform: state
     entity_id: !input bluetooth_sensors
     attribute: connected_paired_devices

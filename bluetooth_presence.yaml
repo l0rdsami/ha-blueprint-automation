@@ -16,17 +16,6 @@ blueprint:
           domain: person
           multiple: true
 
-    bluetooth_sensors:
-      name: Bluetooth Connection Sensors
-      description: >
-        Bluetooth connection sensors to monitor (sensor.xxx_bluetooth_connection).
-        Find these under your person's source device entities.
-        At least one sensor must be specified.
-      selector:
-        entity:
-          domain: sensor
-          multiple: true
-
     bluetooth_macs:
       name: Bluetooth MAC Addresses
       description: Ordered list of MACs (AA:BB:CC:DD:EE:FF)
@@ -39,7 +28,8 @@ blueprint:
       selector:
         object:
 
-mode: restart
+mode: single
+max_exceeded: silent
 
 trigger:
   - platform: state
@@ -48,9 +38,6 @@ trigger:
   - platform: state
     entity_id: !input persons
     attribute: longitude
-  - platform: state
-    entity_id: !input bluetooth_sensors
-    attribute: connected_paired_devices
   - platform: homeassistant
     event: start
 
@@ -82,24 +69,27 @@ variables:
       {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
     {%- endfor -%}
 
-condition:
-  - condition: template
-    value_template: "{{ match | length > 0 }}"
+condition: []
 
 action:
-  - variables:
-      person: "{{ match.split('|')[0] }}"
-      mac: "{{ match.split('|')[1] }}"
-      target: "{{ match.split('|')[2] }}"
-      lat: "{{ state_attr(person, 'latitude') }}"
-      lon: "{{ state_attr(person, 'longitude') }}"
-      acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ match | length > 0 }}"
+        sequence:
+          - variables:
+              person: "{{ match.split('|')[0] }}"
+              mac: "{{ match.split('|')[1] }}"
+              target: "{{ match.split('|')[2] }}"
+              lat: "{{ state_attr(person, 'latitude') }}"
+              lon: "{{ state_attr(person, 'longitude') }}"
+              acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
 
-  - service: device_tracker.see
-    data:
-      dev_id: "{{ target.split('.')[-1] }}"
-      gps:
-        - "{{ lat }}"
-        - "{{ lon }}"
-      gps_accuracy: "{{ acc }}"
-      source_type: gps
+          - service: device_tracker.see
+            data:
+              dev_id: "{{ target.split('.')[-1] }}"
+              gps:
+                - "{{ lat }}"
+                - "{{ lon }}"
+              gps_accuracy: "{{ acc }}"
+              source_type: gps

@@ -1,64 +1,84 @@
 blueprint:
-  name: Bluetooth Presence
-  description: Track the location of something connected to people vie bluetooth
+  name: Bluetooth MAC → Person Location Attribution
+  description: >
+    Assigns device_tracker locations based on Bluetooth MAC connections to
+    person source devices. Person priority is determined by input order.
+    Each MAC maps to its own target device_tracker.
   domain: automation
+
   input:
-    people:
-      name: People
+    persons:
+      name: Persons (priority order)
+      description: First person has highest priority
       selector:
         entity:
-          filter:
-            domain: person
-        multiple: true
-    mac:
-      name: MAC Adress
+          domain: person
+          multiple: true
+
+    bluetooth_macs:
+      name: Bluetooth MAC Addresses
+      description: Ordered list of MACs (AA:BB:CC:DD:EE:FF)
       selector:
-        text: null
+        object:
+
+    target_device_trackers:
+      name: Target Device Trackers
+      description: Ordered list — must match MAC order
+      selector:
+        object:
+
 mode: restart
 
+trigger:
+  - platform: time_pattern
+    seconds: "/10"
+
 variables:
-  people: !input people
-  mac: !input mac
+  people: !input persons
+  macs: !input bluetooth_macs
+  targets: !input target_device_trackers
 
-triggers:
-  - trigger: template
-    value_template:
+  match: >
+    {%- for i in range(macs | length) -%}
+      {%- set mac = macs[i] | lower -%}
+      {%- for person in people -%}
+        {%- set source = state_attr(person, 'source') -%}
+        {%- if source -%}
+          {%- set sensors =
+            device_entities(device_id(source))
+            | select('match', '.*bluetooth_connection$')
+            | list -%}
+          {%- if sensors | length > 0 -%}
+            {%- set devices =
+              state_attr(sensors | first, 'connected_paired_devices') or [] -%}
+            {%- if mac in (devices | join | lower) -%}
+              {{ person }}|{{ mac }}|{{ targets[i] }}
+              {%- break -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
+    {%- endfor -%}
 
+condition:
+  - condition: template
+    value_template: "{{ match | length > 0 }}"
 
-triggers:
-  - trigger: state
-    entity_id: !input light_entity
-    to: null
-    id: light
-  - trigger: state
-    entity_id: !input switch_entity
-    to: null
-    id: switch
+action:
+  - variables:
+      person: "{{ match.split('|')[0] }}"
+      mac: "{{ match.split('|')[1] }}"
+      target: "{{ match.split('|')[2] }}"
+      lat: "{{ state_attr(person, 'latitude') }}"
+      lon: "{{ state_attr(person, 'longitude') }}"
+      acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
 
-conditions:
-  - alias: "States need to be different"
-    condition: template
-    value_template: "{{ states(light_entity) != states(switch_entity) }}"
-  - condition: !input conditions
-
-actions:
-  - alias: "Distinguish Target and Trigger"
-    choose:
-    - conditions:
-        - condition: trigger
-          id: light
-      sequence:
-        - alias: "Toggle switch"
-          service: switch.toggle
-          target:
-            entity_id: !input switch_entity
-    - conditions:
-        - condition: trigger
-          id: switch
-      sequence:
-        - action: light.toggle
-          metadata: {}
-          data:
-            transition: !input delay
-          target:
-            entity_id: !input light_entity
+  - service: device_tracker.see
+    data:
+      dev_id: "{{ target.split('.')[-1] }}"
+      gps:
+        - "{{ lat }}"
+        - "{{ lon }}"
+      gps_accuracy: "{{ acc }}"
+      source_type: gps

@@ -4,6 +4,7 @@ blueprint:
     Assigns device_tracker locations based on Bluetooth MAC connections to
     person source devices. Person priority is determined by input order.
     Each MAC maps to its own target device_tracker.
+    Triggers on state changes for efficient, real-time updates.
   domain: automation
 
   input:

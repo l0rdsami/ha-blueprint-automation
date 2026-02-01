@@ -1,94 +1,84 @@
 blueprint:
-  name: Bluetooth Presence
-  description: Track the location of something connected to people via bluetooth
+  name: Bluetooth MAC → Person Location Attribution
+  description: >
+    Assigns device_tracker locations based on Bluetooth MAC connections to
+    person source devices. Person priority is determined by input order.
+    Each MAC maps to its own target device_tracker.
   domain: automation
+
   input:
-    people:
-      name: People
-      description: Person entities to track
+    persons:
+      name: Persons (priority order)
+      description: First person has highest priority
       selector:
         entity:
-          filter:
-            domain: person
+          domain: person
           multiple: true
-    bluetooth_device:
-      name: Bluetooth Device
-      description: Bluetooth device tracker entity
+
+    bluetooth_macs:
+      name: Bluetooth MAC Addresses
+      description: Ordered list of MACs (AA:BB:CC:DD:EE:FF)
       selector:
-        entity:
-          filter:
-            domain: device_tracker
-          multiple: false
-    target_entity:
-      name: Target Entity
-      description: Device tracker entity to update with location
+        object:
+
+    target_device_trackers:
+      name: Target Device Trackers
+      description: Ordered list — must match MAC order
       selector:
-        entity:
-          domain: device_tracker
-          multiple: false
+        object:
 
 mode: restart
 
-variables:
-  people: !input people
-  bluetooth_device: !input bluetooth_device
-  target_entity: !input target_entity
-
 trigger:
-  - platform: state
-    entity_id: !input people
-    id: person_moved
-  - platform: state
-    entity_id: !input bluetooth_device
-    to: 'home'
-    id: bluetooth_home
-  - platform: state
-    entity_id: !input bluetooth_device
-    from: 'home'
-    id: bluetooth_away
+  - platform: time_pattern
+    seconds: "/10"
+
+variables:
+  people: !input persons
+  macs: !input bluetooth_macs
+  targets: !input target_device_trackers
+
+  match: >
+    {%- for i in range(macs | length) -%}
+      {%- set mac = macs[i] | lower -%}
+      {%- for person in people -%}
+        {%- set source = state_attr(person, 'source') -%}
+        {%- if source -%}
+          {%- set sensors =
+            device_entities(device_id(source))
+            | select('match', '.*bluetooth_connection$')
+            | list -%}
+          {%- if sensors | length > 0 -%}
+            {%- set devices =
+              state_attr(sensors | first, 'connected_paired_devices') or [] -%}
+            {%- if mac in (devices | join | lower) -%}
+              {{ person }}|{{ mac }}|{{ targets[i] }}
+              {%- break -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
+    {%- endfor -%}
 
 condition:
   - condition: template
-    value_template: "{{ trigger.entity_id is defined }}"
+    value_template: "{{ match | length > 0 }}"
 
 action:
-  - alias: "Update location based on bluetooth and person state"
-    choose:
-      - conditions:
-          - condition: trigger
-            id: person_moved
-          - condition: template
-            value_template: "{{ is_state(bluetooth_device, 'home') }}"
-        sequence:
-          - alias: "Update target entity location from person"
-            service: device_tracker.see
-            data:
-              dev_id: "{{ target_entity.split('.')[1] }}"
-              location_name: "{{ states(trigger.entity_id) }}"
-      - conditions:
-          - condition: trigger
-            id: bluetooth_home
-          - condition: template
-            value_template: >
-              {% set person_home = namespace(found=false) %}
-              {% for person in people %}
-                {% if is_state(person, 'home') %}
-                  {% set person_home.found = true %}
-                {% endif %}
-              {% endfor %}
-              {{ person_home.found }}
-        sequence:
-          - alias: "Set target to home"
-            service: device_tracker.see
-            data:
-              dev_id: "{{ target_entity.split('.')[1] }}"
-              location_name: "home"
-      - conditions:
-          - condition: trigger
-            id: bluetooth_away
-        sequence:
-          - alias: "Set target to not_home"
-            service: device_tracker.see
-            data:
-              dev_id: "{{ target_entity.split('.')[1] }}"
-              location_name: "not_home"
+  - variables:
+      person: "{{ match.split('|')[0] }}"
+      mac: "{{ match.split('|')[1] }}"
+      target: "{{ match.split('|')[2] }}"
+      lat: "{{ state_attr(person, 'latitude') }}"
+      lon: "{{ state_attr(person, 'longitude') }}"
+      acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
+
+  - service: device_tracker.see
+    data:
+      dev_id: "{{ target.split('.')[-1] }}"
+      gps:
+        - "{{ lat }}"
+        - "{{ lon }}"
+      gps_accuracy: "{{ acc }}"
+      source_type: gps

@@ -31,12 +31,22 @@ blueprint:
       name: Bluetooth Connection Sensors (Optional)
       description: >
         Optional: Bluetooth connection sensors to monitor for faster updates.
-        If not provided, only person state changes will trigger updates.
+        Leave empty to only trigger on person state changes.
       default: []
       selector:
         entity:
           domain: sensor
           multiple: true
+
+    default_gps_accuracy:
+      name: Default GPS Accuracy
+      description: Default GPS accuracy in meters when not available from person entity
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 500
+          unit_of_measurement: meters
 
 mode: restart
 
@@ -53,28 +63,34 @@ variables:
   people: !input persons
   macs: !input bluetooth_macs
   targets: !input target_device_trackers
+  default_accuracy: !input default_gps_accuracy
 
   match: >
+    {%- set result = '' -%}
     {%- for i in range(macs | length) -%}
-      {%- set mac = macs[i] | lower -%}
-      {%- for person in people -%}
-        {%- set source = state_attr(person, 'source') -%}
-        {%- if source -%}
-          {%- set sensors =
-            device_entities(device_id(source))
-            | select('match', '.*bluetooth_connection$')
-            | list -%}
-          {%- if sensors | length > 0 -%}
-            {%- set devices =
-              state_attr(sensors | first, 'connected_paired_devices') or [] -%}
-            {%- if mac in (devices | join | lower) -%}
-              {{ person }}|{{ mac }}|{{ targets[i] }}
-              {%- break -%}
+      {%- if result == '' -%}
+        {%- set mac = macs[i] | lower -%}
+        {%- for person in people -%}
+          {%- if result == '' -%}
+            {%- set source = state_attr(person, 'source') -%}
+            {%- if source -%}
+              {%- set sensors =
+                device_entities(device_id(source))
+                | select('match', '.*bluetooth_connection$')
+                | list -%}
+              {%- if sensors | length > 0 -%}
+                {%- set devices =
+                  state_attr(sensors | first, 'connected_paired_devices') or [] -%}
+                {%- set devices_lower = devices | map('lower') | list -%}
+                {%- if mac in devices_lower -%}
+                  {%- set result = person ~ '|' ~ mac ~ '|' ~ targets[i] -%}
+                  {{ result }}
+                {%- endif -%}
+              {%- endif -%}
             {%- endif -%}
           {%- endif -%}
-        {%- endif -%}
-      {%- endfor -%}
-      {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
     {%- endfor -%}
 
 condition:
@@ -88,7 +104,7 @@ action:
       target: "{{ match.split('|')[2] }}"
       lat: "{{ state_attr(person, 'latitude') }}"
       lon: "{{ state_attr(person, 'longitude') }}"
-      acc: "{{ state_attr(person, 'gps_accuracy') or 50 }}"
+      acc: "{{ state_attr(person, 'gps_accuracy') or default_accuracy }}"
 
   - service: device_tracker.see
     data:

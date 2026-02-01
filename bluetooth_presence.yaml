@@ -69,8 +69,6 @@ variables:
       {%- if match is defined and match | length > 0 -%}{%- break -%}{%- endif -%}
     {%- endfor -%}
 
-condition: []
-
 action:
   - choose:
       - conditions:

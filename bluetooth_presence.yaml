@@ -27,11 +27,27 @@ blueprint:
       selector:
         object:
 
+    bluetooth_sensors:
+      name: Bluetooth Connection Sensors (Optional)
+      description: >
+        Optional: Bluetooth connection sensors to monitor for faster updates.
+        If not provided, only person state changes will trigger updates.
+      default: []
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+
 mode: restart
 
 trigger:
-  - platform: time_pattern
-    seconds: "/10"
+  - platform: state
+    entity_id: !input persons
+    id: person_state_changed
+  - platform: state
+    entity_id: !input bluetooth_sensors
+    attribute: connected_paired_devices
+    id: bluetooth_changed
 
 variables:
   people: !input persons

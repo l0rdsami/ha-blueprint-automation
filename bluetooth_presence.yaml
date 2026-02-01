@@ -1,64 +1,94 @@
 blueprint:
   name: Bluetooth Presence
-  description: Track the location of something connected to people vie bluetooth
+  description: Track the location of something connected to people via bluetooth
   domain: automation
   input:
     people:
       name: People
+      description: Person entities to track
       selector:
         entity:
           filter:
             domain: person
-        multiple: true
-    mac:
-      name: MAC Adress
+          multiple: true
+    bluetooth_device:
+      name: Bluetooth Device
+      description: Bluetooth device tracker entity
       selector:
-        text: null
+        entity:
+          filter:
+            domain: device_tracker
+          multiple: false
+    target_entity:
+      name: Target Entity
+      description: Entity to update with location (e.g., device_tracker or person entity to update)
+      selector:
+        entity:
+          domain: [device_tracker, person]
+          multiple: false
+
 mode: restart
 
 variables:
   people: !input people
-  mac: !input mac
+  bluetooth_device: !input bluetooth_device
+  target_entity: !input target_entity
 
-triggers:
-  - trigger: template
-    value_template:
+trigger:
+  - platform: state
+    entity_id: !input people
+    id: person_moved
+  - platform: state
+    entity_id: !input bluetooth_device
+    to: 'home'
+    id: bluetooth_home
+  - platform: state
+    entity_id: !input bluetooth_device
+    from: 'home'
+    id: bluetooth_away
 
+condition:
+  - condition: template
+    value_template: "{{ trigger.entity_id is defined }}"
 
-triggers:
-  - trigger: state
-    entity_id: !input light_entity
-    to: null
-    id: light
-  - trigger: state
-    entity_id: !input switch_entity
-    to: null
-    id: switch
-
-conditions:
-  - alias: "States need to be different"
-    condition: template
-    value_template: "{{ states(light_entity) != states(switch_entity) }}"
-  - condition: !input conditions
-
-actions:
-  - alias: "Distinguish Target and Trigger"
+action:
+  - alias: "Update location based on bluetooth and person state"
     choose:
-    - conditions:
-        - condition: trigger
-          id: light
-      sequence:
-        - alias: "Toggle switch"
-          service: switch.toggle
-          target:
-            entity_id: !input switch_entity
-    - conditions:
-        - condition: trigger
-          id: switch
-      sequence:
-        - action: light.toggle
-          metadata: {}
-          data:
-            transition: !input delay
-          target:
-            entity_id: !input light_entity
+      - conditions:
+          - condition: trigger
+            id: person_moved
+          - condition: template
+            value_template: "{{ is_state(bluetooth_device, 'home') }}"
+        sequence:
+          - alias: "Update target entity location from person"
+            service: device_tracker.see
+            data:
+              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              location_name: "{{ states(trigger.entity_id) }}"
+      - conditions:
+          - condition: trigger
+            id: bluetooth_home
+          - condition: template
+            value_template: >
+              {% set person_home = namespace(found=false) %}
+              {% for person in people %}
+                {% if is_state(person, 'home') %}
+                  {% set person_home.found = true %}
+                {% endif %}
+              {% endfor %}
+              {{ person_home.found }}
+        sequence:
+          - alias: "Set target to home"
+            service: device_tracker.see
+            data:
+              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              location_name: "home"
+      - conditions:
+          - condition: trigger
+            id: bluetooth_away
+        sequence:
+          - alias: "Set target to not_home"
+            service: device_tracker.see
+            data:
+              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              location_name: "not_home"

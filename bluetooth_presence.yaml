@@ -15,6 +15,17 @@ blueprint:
           domain: person
           multiple: true
 
+    bluetooth_sensors:
+      name: Bluetooth Connection Sensors
+      description: >
+        Bluetooth connection sensors to monitor (sensor.xxx_bluetooth_connection).
+        Find these under your person's source device entities.
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+      default: []
+
     bluetooth_macs:
       name: Bluetooth MAC Addresses
       description: Ordered list of MACs (AA:BB:CC:DD:EE:FF)
@@ -30,8 +41,13 @@ blueprint:
 mode: restart
 
 trigger:
-  - platform: time_pattern
-    seconds: "/10"
+  - platform: state
+    entity_id: !input persons
+  - platform: state
+    entity_id: !input bluetooth_sensors
+    attribute: connected_paired_devices
+  - platform: homeassistant
+    event: start
 
 variables:
   people: !input persons

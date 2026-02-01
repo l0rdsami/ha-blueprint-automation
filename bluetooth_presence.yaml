@@ -21,10 +21,10 @@ blueprint:
           multiple: false
     target_entity:
       name: Target Entity
-      description: Entity to update with location (e.g., device_tracker or person entity to update)
+      description: Device tracker entity to update with location
       selector:
         entity:
-          domain: [device_tracker, person]
+          domain: device_tracker
           multiple: false
 
 mode: restart
@@ -63,7 +63,7 @@ action:
           - alias: "Update target entity location from person"
             service: device_tracker.see
             data:
-              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              dev_id: "{{ target_entity.split('.')[1] }}"
               location_name: "{{ states(trigger.entity_id) }}"
       - conditions:
           - condition: trigger
@@ -81,7 +81,7 @@ action:
           - alias: "Set target to home"
             service: device_tracker.see
             data:
-              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              dev_id: "{{ target_entity.split('.')[1] }}"
               location_name: "home"
       - conditions:
           - condition: trigger
@@ -90,5 +90,5 @@ action:
           - alias: "Set target to not_home"
             service: device_tracker.see
             data:
-              dev_id: "{{ state_attr(target_entity, 'id') or target_entity.split('.')[1] }}"
+              dev_id: "{{ target_entity.split('.')[1] }}"
               location_name: "not_home"

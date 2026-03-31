@@ -11,15 +11,17 @@ blueprint:
     presence_entities:
       name: Presence Sensors
       description: >
-        One or more presence sensor devices. Any sensor turning on will
-        trigger the light.
+        One or more presence sensor devices or groups. Any sensor or group
+        turning on will trigger the light.
       selector:
         entity:
           filter:
-            domain:
-            - binary_sensor
-            device_class:
-            - occupancy
+            - domain:
+              - binary_sensor
+              device_class:
+              - occupancy
+            - domain:
+              - group
           multiple: true
     light_target:
       name: Light
@@ -96,17 +98,19 @@ blueprint:
     antizone_entities:
       name: Antizone Sensors (optional)
       description: >
-        Presence sensors that block the light from turning on (e.g., sensors
-        in adjacent areas). They will NOT turn the light off if it is already
-        on.
+        Presence sensors or groups that block the light from turning on (e.g.,
+        sensors in adjacent areas). They will NOT turn the light off if it is
+        already on.
       default: []
       selector:
         entity:
           filter:
-            domain:
-            - binary_sensor
-            device_class:
-            - occupancy
+            - domain:
+              - binary_sensor
+              device_class:
+              - occupancy
+            - domain:
+              - group
           multiple: true
     antizone_clear_timeout:
       name: Antizone clear timeout

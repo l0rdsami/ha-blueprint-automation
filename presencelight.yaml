@@ -1,13 +1,18 @@
 blueprint:
   name: Presence-activated Light
-  description: Turn on a light when presence is detected.
+  description: >
+    Turn on a light when presence is detected. Supports multiple presence
+    sensors, optional lux threshold, antizone sensors that block activation,
+    and optional scene activation.
   homeassistant:
     min_version: 2023.8.0
   domain: automation
   input:
-    presence_entity:
-      name: Presence Sensor
-      description: Presence sensor device
+    presence_entities:
+      name: Presence Sensors
+      description: >
+        One or more presence sensor devices. Any sensor turning on will
+        trigger the light.
       selector:
         entity:
           filter:
@@ -15,15 +20,31 @@ blueprint:
             - binary_sensor
             device_class:
             - occupancy
-          multiple: false
+          multiple: true
     light_target:
       name: Light
-      description: Light device
+      description: >
+        Light(s) to control. Leave empty if using a scene (the scene's light
+        entities will be used for turn off automatically).
+      default: {}
       selector:
         target:
           entity:
           - domain:
             - light
+    on_scene:
+      name: On Scene (optional)
+      description: >
+        Scene to activate when presence is detected. If set, activates this
+        scene instead of turning on lights directly. The scene's light
+        entities are used for turn off unless a Light target is also specified.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain:
+            - scene
+          multiple: false
     no_motion_wait:
       name: Wait time
       description: Time to leave the light on after last motion is detected.
@@ -37,7 +58,7 @@ blueprint:
           step: 1.0
     off_transition:
       name: Transition time
-      description: Time in seconds of transition
+      description: Time in seconds for light transition (on and off).
       default: 0
       selector:
         number:
@@ -47,9 +68,11 @@ blueprint:
           mode: slider
           step: 1.0
     light_sensor:
-      name: Light sensor
-      description: Light sensor to read from
-      default: []
+      name: Light sensor (optional)
+      description: >
+        Illuminance sensor. If set, light only turns on when lux is below
+        the threshold. Leave empty to skip the lux check.
+      default: ""
       selector:
         entity:
           filter:
@@ -60,7 +83,9 @@ blueprint:
           multiple: false
     light_threshold:
       name: Light threshold
-      description: Light sensor‘s lower threshold
+      description: >
+        Light sensor upper threshold. Light turns on only when lux is below
+        this value.
       default: 200
       selector:
         number:
@@ -68,51 +93,129 @@ blueprint:
           max: 3000
           mode: slider
           step: 1.0
+    antizone_entities:
+      name: Antizone Sensors (optional)
+      description: >
+        Presence sensors that block the light from turning on (e.g., sensors
+        in adjacent areas). They will NOT turn the light off if it is already
+        on.
+      default: []
+      selector:
+        entity:
+          filter:
+            domain:
+            - binary_sensor
+            device_class:
+            - occupancy
+          multiple: true
+    antizone_clear_timeout:
+      name: Antizone clear timeout
+      description: >
+        Seconds to wait after an antizone sensor clears before allowing the
+        light to turn on again.
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 3600.0
+          unit_of_measurement: seconds
+          mode: slider
+          step: 1.0
     additional_conditions:
       name: Additional conditions
       description: |
-        Extra conditions you may want to add to this automation 
+        Extra conditions you may want to add to this automation
         (Example: Home occupied, TV on, etc)
       default: []
       selector:
         condition:
+
+variables:
+  light_sensor: !input light_sensor
+  light_threshold: !input light_threshold
+  antizone_entities: !input antizone_entities
+  antizone_clear_timeout: !input antizone_clear_timeout
+  on_scene: !input on_scene
+  presence_entities: !input presence_entities
+  light_target: !input light_target
+
 trigger:
   platform: state
-  entity_id: !input presence_entity
-  from: 'off'
+  entity_id: !input presence_entities
   to: 'on'
+
 condition:
-- condition: numeric_state
-  entity_id: !input light_sensor
-  below: !input light_threshold
-- condition: !input additional_conditions
+  - alias: Lux check (skipped if no sensor configured)
+    condition: template
+    value_template: >
+      {{ light_sensor == '' or
+         (states(light_sensor) not in ('unavailable', 'unknown', '')
+          and states(light_sensor) | float(0) < light_threshold) }}
+  - alias: Antizone check (blocked if any antizone is active or recently cleared)
+    condition: template
+    value_template: >
+      {% set ns = namespace(blocked=false) %}
+      {% for entity in antizone_entities %}
+        {% if is_state(entity, 'on') %}
+          {% set ns.blocked = true %}
+        {% elif antizone_clear_timeout > 0 and
+                (now() - states[entity].last_changed).total_seconds() < antizone_clear_timeout %}
+          {% set ns.blocked = true %}
+        {% endif %}
+      {% endfor %}
+      {{ not ns.blocked }}
+  - condition: !input additional_conditions
 
 action:
-- alias: Turn on the light
-  action: light.turn_on
-  metadata: {}
-  data:
-    transition: !input off_transition
-  target: !input light_target
-- alias: Wait until light transitioned
-  delay: !input off_transition
-- alias: Wait until there is no motion from device
-  wait_for_trigger:
-    platform: state
-    entity_id: !input presence_entity
-    from: 'on'
-    to: 'off'
-    for:
+  - alias: Turn on the light or activate scene
+    choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ on_scene != '' }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ on_scene }}"
+    default:
+      - action: light.turn_on
+        data:
+          transition: !input off_transition
+        target: !input light_target
+  - alias: Wait until light transitioned
+    delay: !input off_transition
+  - alias: Wait until there is no motion from any sensor
+    wait_for_trigger:
+      - platform: template
+        value_template: >
+          {% set ns = namespace(all_off=true) %}
+          {% for entity in presence_entities %}
+            {% if is_state(entity, 'on') %}{% set ns.all_off = false %}{% endif %}
+          {% endfor %}
+          {{ ns.all_off }}
+  - alias: Wait the no_motion_wait period
+    delay:
       seconds: !input no_motion_wait
-- alias: Wait the number of seconds that has been set
-  delay: !input no_motion_wait
-- alias: Turn off the light
-  service: light.turn_off
-  target: !input light_target
-  data:
-    transition: !input off_transition
-- alias: Wait until light transitioned
-  delay: !input off_transition
+  - alias: Turn off the light
+    choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ on_scene != '' and light_target | length == 0 }}"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: >
+                {{ state_attr(on_scene, 'entity_id')
+                   | select('match', '^light\.')
+                   | list }}
+            data:
+              transition: !input off_transition
+    default:
+      - action: light.turn_off
+        target: !input light_target
+        data:
+          transition: !input off_transition
+  - alias: Wait until light transitioned
+    delay: !input off_transition
 
 mode: restart
 max_exceeded: silent

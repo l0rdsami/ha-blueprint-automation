@@ -6,9 +6,14 @@ blueprint:
     have left home. When someone returns the door is unlocked (night-latch
     compatible – the bolt is retracted but the door is not physically opened),
     and everyone currently at home receives a persistent, actionable
-    notification to open the door immediately. An optional night mode prevents
-    automatic unlocking during quiet hours so that arrivals must be manually
-    approved by someone inside.
+    notification to open the door. The notification stays active for as long as
+    the person remains home and is cleared automatically when they leave. An
+    optional night mode prevents automatic unlocking during quiet hours so that
+    arrivals must be manually approved by someone inside; it can also lock and
+    unlock the door automatically at its start and end times.
+
+    The "Open Door" button survives Home Assistant restarts because it is
+    handled by a dedicated event trigger, not a timed wait inside a run.
 
     Requires a custom notify script called notify.people that accepts the same
     arguments as a standard Home Assistant notify service (message, title, data).
@@ -98,6 +103,11 @@ trigger:
   - platform: time
     at: !input night_mode_end
     id: night_mode_end
+  - platform: event
+    event_type: mobile_app_notification_action
+    event_data:
+      action: OPEN_DOOR_NOW
+    id: open_door_action
 
 condition: []
 
@@ -150,6 +160,9 @@ action:
 
           # Notify every person currently at home individually (including the new
           # arrival) so that each notification can be dismissed per-person later.
+          # The notification persists until the person leaves; the "Open Door"
+          # button is handled by the open_door_action trigger so it works at
+          # any time, including after a Home Assistant restart.
           - repeat:
               for_each: "{{ home_people }}"
               sequence:
@@ -168,25 +181,6 @@ action:
                       actions:
                         - action: OPEN_DOOR_NOW
                           title: "Open Door"
-
-          # Wait up to 10 minutes for someone to tap "Open Door"
-          - wait_for_trigger:
-              - platform: event
-                event_type: mobile_app_notification_action
-                event_data:
-                  action: OPEN_DOOR_NOW
-            timeout:
-              minutes: 10
-            continue_on_timeout: true
-
-          # Open the door latch if the notification was acted on
-          - if:
-              - condition: template
-                value_template: "{{ wait.trigger is not none }}"
-            then:
-              - action: lock.open
-                target:
-                  entity_id: "{{ lock_entity }}"
 
       # ── Someone left home ────────────────────────────────────────────────
       - conditions:
@@ -244,6 +238,17 @@ action:
             value_template: "{{ trigger.id == 'night_mode_end' and night_mode_enabled and not all_away }}"
         sequence:
           - action: lock.unlock
+            target:
+              entity_id: "{{ lock_entity }}"
+
+      # ── "Open Door" button tapped in notification ────────────────────────
+      # Handled as an event trigger so it works at any time, including after
+      # a Home Assistant restart (no wait_for_trigger state to lose).
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'open_door_action' }}"
+        sequence:
+          - action: lock.open
             target:
               entity_id: "{{ lock_entity }}"
 

@@ -92,17 +92,20 @@ condition: []
 
 action:
   - variables:
-      arrived_person: "{{ trigger.entity_id }}"
+      triggered_person: "{{ trigger.entity_id }}"
       new_state: "{{ trigger.to_state.state }}"
       old_state: "{{ trigger.from_state.state if trigger.from_state else '' }}"
-      all_away: >
-        {% set ns = namespace(away=true) %}
+      # List of people currently in the home zone (includes the newly arrived person)
+      home_people: >
+        {% set ns = namespace(result=[]) %}
         {% for p in people %}
-          {% if states(p) == 'home' %}
-            {% set ns.away = false %}
+          {% if is_state(p, 'home') %}
+            {% set ns.result = ns.result + [p] %}
           {% endif %}
         {% endfor %}
-        {{ ns.away }}
+        {{ ns.result }}
+      # True when nobody from the tracked list is home
+      all_away: "{{ home_people | length == 0 }}"
       is_night_mode: >
         {% if not night_mode_enabled %}
           false
@@ -116,8 +119,8 @@ action:
             {{ t >= night_mode_start or t < night_mode_end }}
           {% endif %}
         {% endif %}
-      arrived_name: >
-        {{ state_attr(arrived_person, 'friendly_name') | default(arrived_person) }}
+      triggered_name: >
+        {{ state_attr(triggered_person, 'friendly_name') | default(triggered_person) }}
 
   - choose:
       # ── Someone arrived home ─────────────────────────────────────────────
@@ -134,20 +137,26 @@ action:
                 target:
                   entity_id: "{{ lock_entity }}"
 
-          # Notify everyone at home – persistent & actionable
-          - action: notify.people
-            data:
-              title: "{{ arrived_name }} is home"
-              message: >
-                {{ arrived_name }} just arrived.
-                {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
-                Open the door now?
-              data:
-                persistent: true
-                tag: door_arrival_notification
-                actions:
-                  - action: OPEN_DOOR_NOW
-                    title: "Open Door"
+          # Notify every person currently at home individually (including the new
+          # arrival) so that each notification can be dismissed per-person later.
+          - repeat:
+              for_each: "{{ home_people }}"
+              sequence:
+                - action: notify.people
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                  data:
+                    title: "{{ triggered_name }} is home"
+                    message: >
+                      {{ triggered_name }} just arrived.
+                      {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
+                      Open the door now?
+                    data:
+                      persistent: true
+                      tag: door_arrival_notification
+                      actions:
+                        - action: OPEN_DOOR_NOW
+                          title: "Open Door"
 
           # Wait up to 10 minutes for someone to tap "Open Door"
           - wait_for_trigger:
@@ -168,32 +177,46 @@ action:
                 target:
                   entity_id: "{{ lock_entity }}"
 
-      # ── All people left home – start the auto-lock timer ─────────────────
+      # ── Someone left home ────────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: "{{ new_state != 'home' and all_away }}"
+            value_template: "{{ new_state != 'home' and old_state == 'home' }}"
         sequence:
-          - delay:
-              minutes: "{{ lock_delay | int }}"
+          # Dismiss the arrival notification only for the person who left
+          - action: notify.people
+            target:
+              entity_id: "{{ triggered_person }}"
+            data:
+              message: "clear_notification"
+              data:
+                tag: door_arrival_notification
 
-          # Re-check: only lock if everyone is still away after the delay
-          - variables:
-              still_all_away: >
-                {% set ns = namespace(away=true) %}
-                {% for p in people %}
-                  {% if states(p) == 'home' %}
-                    {% set ns.away = false %}
-                  {% endif %}
-                {% endfor %}
-                {{ ns.away }}
-
+          # Start the auto-lock timer only when all people are now away
           - if:
               - condition: template
-                value_template: "{{ still_all_away }}"
+                value_template: "{{ all_away }}"
             then:
-              - action: lock.lock
-                target:
-                  entity_id: "{{ lock_entity }}"
+              - delay:
+                  minutes: "{{ lock_delay | int }}"
+
+              # Re-check: only lock if everyone is still away after the delay
+              - variables:
+                  still_all_away: >
+                    {% set ns = namespace(away=true) %}
+                    {% for p in people %}
+                      {% if is_state(p, 'home') %}
+                        {% set ns.away = false %}
+                      {% endif %}
+                    {% endfor %}
+                    {{ ns.away }}
+
+              - if:
+                  - condition: template
+                    value_template: "{{ still_all_away }}"
+                then:
+                  - action: lock.lock
+                    target:
+                      entity_id: "{{ lock_entity }}"
 
 mode: restart
 max_exceeded: silent

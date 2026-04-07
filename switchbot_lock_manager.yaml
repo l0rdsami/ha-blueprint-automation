@@ -54,23 +54,28 @@ blueprint:
     night_mode_enabled:
       name: Enable Night Mode
       description: >
-        When enabled the door will not auto-unlock when someone arrives during
-        night mode hours. People at home will still receive a notification and
-        can open the door manually.
+        When enabled: the door locks automatically at night mode start, unlocks
+        at night mode end (if someone is home), and auto-unlock on arrival is
+        suppressed during the night window. People at home still receive a
+        notification during night mode and can open the door manually.
       default: false
       selector:
         boolean:
 
     night_mode_start:
       name: Night Mode Start
-      description: Time at which night mode begins (auto-unlock is disabled).
+      description: >
+        Time at which night mode begins. The door is locked automatically at
+        this time and auto-unlock on arrival is disabled.
       default: "22:00:00"
       selector:
         time:
 
     night_mode_end:
       name: Night Mode End
-      description: Time at which night mode ends (auto-unlock is re-enabled).
+      description: >
+        Time at which night mode ends. The door is unlocked automatically at
+        this time if at least one tracked person is home.
       default: "07:00:00"
       selector:
         time:
@@ -87,14 +92,20 @@ trigger:
   - platform: state
     entity_id: !input people
     id: person_state_change
+  - platform: time
+    at: !input night_mode_start
+    id: night_mode_start
+  - platform: time
+    at: !input night_mode_end
+    id: night_mode_end
 
 condition: []
 
 action:
   - variables:
-      triggered_person: "{{ trigger.entity_id }}"
-      new_state: "{{ trigger.to_state.state }}"
-      old_state: "{{ trigger.from_state.state if trigger.from_state else '' }}"
+      triggered_person: "{{ trigger.entity_id if trigger.entity_id is defined else '' }}"
+      new_state: "{{ trigger.to_state.state if trigger.to_state is defined and trigger.to_state is not none else '' }}"
+      old_state: "{{ trigger.from_state.state if trigger.from_state is defined and trigger.from_state is not none else '' }}"
       # List of people currently in the home zone (includes the newly arrived person)
       home_people: >
         {% set ns = namespace(result=[]) %}
@@ -217,6 +228,24 @@ action:
                   - action: lock.lock
                     target:
                       entity_id: "{{ lock_entity }}"
+
+      # ── Night mode started – lock the door ───────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'night_mode_start' and night_mode_enabled }}"
+        sequence:
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_entity }}"
+
+      # ── Night mode ended – unlock if someone is home ──────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'night_mode_end' and night_mode_enabled and not all_away }}"
+        sequence:
+          - action: lock.unlock
+            target:
+              entity_id: "{{ lock_entity }}"
 
 mode: restart
 max_exceeded: silent

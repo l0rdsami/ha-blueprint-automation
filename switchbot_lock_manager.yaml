@@ -5,20 +5,20 @@ blueprint:
     people. The door locks after a configurable delay once all tracked people
     have left home. When someone returns the door is unlocked (night-latch
     compatible – the bolt is retracted but the door is not physically opened),
-    and everyone currently at home receives a persistent, actionable
-    notification to open the door. The notification stays active for as long as
-    the person remains home and is cleared automatically when they leave. An
-    optional night mode prevents automatic unlocking during quiet hours so that
-    arrivals must be manually approved by someone inside; it can also lock and
-    unlock the door automatically at its start and end times.
+    and the arriving person receives a persistent, actionable notification to
+    open the door. The notification stays active for as long as the person
+    remains home and is cleared automatically when they leave. An optional night
+    mode prevents automatic unlocking during quiet hours so that arrivals must be
+    manually approved by someone inside; it can also lock and unlock the door
+    automatically at its start and end times.
 
     The "Open Door" button survives Home Assistant restarts because it is
     handled by a dedicated event trigger, not a timed wait inside a run.
 
-    Requires a custom notify script called notify.people that accepts the same
-    arguments as a standard Home Assistant notify service (message, title, data).
-    Add it to your scripts.yaml or configure it via the UI before using this
-    blueprint.
+    Requires a custom notify script called script.notify_people that accepts the
+    same arguments as a standard Home Assistant notify service (message, title,
+    data). Add it to your scripts.yaml or configure it via the UI before using
+    this blueprint.
   domain: automation
   homeassistant:
     min_version: 2023.8.0
@@ -158,29 +158,24 @@ action:
                 target:
                   entity_id: "{{ lock_entity }}"
 
-          # Notify every person currently at home individually (including the new
-          # arrival) so that each notification can be dismissed per-person later.
-          # The notification persists until the person leaves; the "Open Door"
-          # button is handled by the open_door_action trigger so it works at
-          # any time, including after a Home Assistant restart.
-          - repeat:
-              for_each: "{{ home_people }}"
-              sequence:
-                - action: notify.people
-                  target:
-                    entity_id: "{{ repeat.item }}"
-                  data:
-                    title: "{{ triggered_name }} is home"
-                    message: >
-                      {{ triggered_name }} just arrived.
-                      {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
-                      Open the door now?
-                    data:
-                      persistent: true
-                      tag: door_arrival_notification
-                      actions:
-                        - action: OPEN_DOOR_NOW
-                          title: "Open Door"
+          # Notify only the person who just arrived home with a persistent,
+          # actionable notification. The "Open Door" button is handled by the
+          # open_door_action trigger so it works at any time, including after a
+          # Home Assistant restart.
+          - action: script.notify_people
+            data:
+              target: "{{ triggered_person }}"
+              title: "{{ triggered_name }} is home"
+              message: >
+                {{ triggered_name }} just arrived.
+                {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
+                Open the door now?
+              data:
+                persistent: true
+                tag: door_arrival_notification
+                actions:
+                  - action: OPEN_DOOR_NOW
+                    title: "Open Door"
 
       # ── Someone left home ────────────────────────────────────────────────
       - conditions:
@@ -188,10 +183,9 @@ action:
             value_template: "{{ new_state != 'home' and old_state == 'home' }}"
         sequence:
           # Dismiss the arrival notification only for the person who left
-          - action: notify.people
-            target:
-              entity_id: "{{ triggered_person }}"
+          - action: script.notify_people
             data:
+              target: "{{ triggered_person }}"
               message: "clear_notification"
               data:
                 tag: door_arrival_notification

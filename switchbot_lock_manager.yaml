@@ -172,6 +172,7 @@ action:
                 {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
                 Open the door now?
               data:
+                sticky: true
                 persistent: true
                 tag: door_arrival_notification
                 actions:

@@ -1,0 +1,199 @@
+blueprint:
+  name: SwitchBot Lock Manager
+  description: >
+    Automatically manage a lock (e.g. SwitchBot) based on the presence of
+    people. The door locks after a configurable delay once all tracked people
+    have left home. When someone returns the door is unlocked (night-latch
+    compatible – the bolt is retracted but the door is not physically opened),
+    and everyone currently at home receives a persistent, actionable
+    notification to open the door immediately. An optional night mode prevents
+    automatic unlocking during quiet hours so that arrivals must be manually
+    approved by someone inside.
+
+    Requires a custom notify script called notify.people that accepts the same
+    arguments as a standard Home Assistant notify service (message, title, data).
+    Add it to your scripts.yaml or configure it via the UI before using this
+    blueprint.
+  domain: automation
+  homeassistant:
+    min_version: 2023.8.0
+
+  input:
+    lock_entity:
+      name: Lock
+      description: The lock entity to manage (e.g. your SwitchBot lock).
+      selector:
+        entity:
+          domain: lock
+
+    people:
+      name: People
+      description: >
+        People to track for presence. The door locks after the configured delay
+        when all of them are away from home, and unlocks when any of them
+        returns.
+      selector:
+        entity:
+          domain: person
+          multiple: true
+
+    lock_delay:
+      name: Auto-Lock Delay
+      description: >
+        Minutes to wait after all people have left before the door is locked
+        automatically. Set to 0 to lock immediately.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          step: 1
+          unit_of_measurement: min
+          mode: slider
+
+    night_mode_enabled:
+      name: Enable Night Mode
+      description: >
+        When enabled the door will not auto-unlock when someone arrives during
+        night mode hours. People at home will still receive a notification and
+        can open the door manually.
+      default: false
+      selector:
+        boolean:
+
+    night_mode_start:
+      name: Night Mode Start
+      description: Time at which night mode begins (auto-unlock is disabled).
+      default: "22:00:00"
+      selector:
+        time:
+
+    night_mode_end:
+      name: Night Mode End
+      description: Time at which night mode ends (auto-unlock is re-enabled).
+      default: "07:00:00"
+      selector:
+        time:
+
+variables:
+  lock_entity: !input lock_entity
+  people: !input people
+  lock_delay: !input lock_delay
+  night_mode_enabled: !input night_mode_enabled
+  night_mode_start: !input night_mode_start
+  night_mode_end: !input night_mode_end
+
+trigger:
+  - platform: state
+    entity_id: !input people
+    id: person_state_change
+
+condition: []
+
+action:
+  - variables:
+      arrived_person: "{{ trigger.entity_id }}"
+      new_state: "{{ trigger.to_state.state }}"
+      old_state: "{{ trigger.from_state.state if trigger.from_state else '' }}"
+      all_away: >
+        {% set ns = namespace(away=true) %}
+        {% for p in people %}
+          {% if states(p) == 'home' %}
+            {% set ns.away = false %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.away }}
+      is_night_mode: >
+        {% if not night_mode_enabled %}
+          false
+        {% else %}
+          {# Time strings are zero-padded HH:MM:SS, so lexicographic comparison
+             is equivalent to chronological comparison for 24-hour clock values. #}
+          {% set t = now().strftime('%H:%M:%S') %}
+          {% if night_mode_start <= night_mode_end %}
+            {{ night_mode_start <= t < night_mode_end }}
+          {% else %}
+            {{ t >= night_mode_start or t < night_mode_end }}
+          {% endif %}
+        {% endif %}
+      arrived_name: >
+        {{ state_attr(arrived_person, 'friendly_name') | default(arrived_person) }}
+
+  - choose:
+      # ── Someone arrived home ─────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ new_state == 'home' and old_state != 'home' }}"
+        sequence:
+          # Unlock the door unless night mode is active
+          - if:
+              - condition: template
+                value_template: "{{ not is_night_mode }}"
+            then:
+              - action: lock.unlock
+                target:
+                  entity_id: "{{ lock_entity }}"
+
+          # Notify everyone at home – persistent & actionable
+          - action: notify.people
+            data:
+              title: "{{ arrived_name }} is home"
+              message: >
+                {{ arrived_name }} just arrived.
+                {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
+                Open the door now?
+              data:
+                persistent: true
+                tag: door_arrival_notification
+                actions:
+                  - action: OPEN_DOOR_NOW
+                    title: "Open Door"
+
+          # Wait up to 10 minutes for someone to tap "Open Door"
+          - wait_for_trigger:
+              - platform: event
+                event_type: mobile_app_notification_action
+                event_data:
+                  action: OPEN_DOOR_NOW
+            timeout:
+              minutes: 10
+            continue_on_timeout: true
+
+          # Open the door latch if the notification was acted on
+          - if:
+              - condition: template
+                value_template: "{{ wait.trigger is not none }}"
+            then:
+              - action: lock.open
+                target:
+                  entity_id: "{{ lock_entity }}"
+
+      # ── All people left home – start the auto-lock timer ─────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ new_state != 'home' and all_away }}"
+        sequence:
+          - delay:
+              minutes: "{{ lock_delay | int }}"
+
+          # Re-check: only lock if everyone is still away after the delay
+          - variables:
+              still_all_away: >
+                {% set ns = namespace(away=true) %}
+                {% for p in people %}
+                  {% if states(p) == 'home' %}
+                    {% set ns.away = false %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.away }}
+
+          - if:
+              - condition: template
+                value_template: "{{ still_all_away }}"
+            then:
+              - action: lock.lock
+                target:
+                  entity_id: "{{ lock_entity }}"
+
+mode: restart
+max_exceeded: silent

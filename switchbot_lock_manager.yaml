@@ -141,7 +141,11 @@ action:
           {% endif %}
         {% endif %}
       triggered_name: >
-        {{ state_attr(triggered_person, 'friendly_name') | default(triggered_person) }}
+        {% if triggered_person %}
+          {{ state_attr(triggered_person, 'friendly_name') | default(triggered_person, true) }}
+        {% else %}
+          time_trigger
+        {% endif %}
 
   - choose:
       # ── Someone arrived home ─────────────────────────────────────────────

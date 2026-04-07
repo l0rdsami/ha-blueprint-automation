@@ -164,7 +164,8 @@ action:
           # Home Assistant restart.
           - action: script.notify_people
             data:
-              target: "{{ triggered_person }}"
+              persons:
+                - "{{ triggered_person }}"
               title: "{{ triggered_name }} is home"
               message: >
                 {{ triggered_name }} just arrived.
@@ -185,7 +186,8 @@ action:
           # Dismiss the arrival notification only for the person who left
           - action: script.notify_people
             data:
-              target: "{{ triggered_person }}"
+              persons:
+                - "{{ triggered_person }}"
               message: "clear_notification"
               data:
                 tag: door_arrival_notification

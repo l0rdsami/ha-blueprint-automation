@@ -19,34 +19,49 @@ blueprint:
     same arguments as a standard Home Assistant notify service (message, title,
     data). Add it to your scripts.yaml or configure it via the UI before using
     this blueprint.
+
+    ---
+
+    Steuert automatisch ein Schloss (z. B. SwitchBot) anhand der Anwesenheit
+    von Personen. Die Tür sperrt nach einer einstellbaren Verzögerung, sobald
+    alle verfolgten Personen das Haus verlassen haben. Bei Rückkehr wird die
+    Tür entsperrt und die ankommende Person erhält eine persistente,
+    interaktive Benachrichtigung. Ein optionaler Nachtmodus unterdrückt das
+    automatische Entsperren während der Ruhezeiten.
   domain: automation
   homeassistant:
     min_version: 2023.8.0
 
   input:
     lock_entity:
-      name: Lock
-      description: The lock entity to manage (e.g. your SwitchBot lock).
+      name: Lock / Schloss
+      description: >
+        The lock entity to manage (e.g. your SwitchBot lock).
+        | Die zu verwaltende Schloss-Entität (z. B. SwitchBot-Schloss).
       selector:
         entity:
           domain: lock
 
     people:
-      name: People
+      name: People / Personen
       description: >
         People to track for presence. The door locks after the configured delay
         when all of them are away from home, and unlocks when any of them
         returns.
+        | Zu überwachende Personen. Das Schloss sperrt nach der eingestellten
+        Verzögerung, wenn alle abwesend sind, und entsperrt bei Rückkehr.
       selector:
         entity:
           domain: person
           multiple: true
 
     lock_delay:
-      name: Auto-Lock Delay
+      name: Auto-Lock Delay / Automatische Sperrzeit
       description: >
         Minutes to wait after all people have left before the door is locked
         automatically. Set to 0 to lock immediately.
+        | Minuten, die gewartet werden, bevor die Tür automatisch gesperrt
+        wird. 0 = sofort sperren.
       default: 5
       selector:
         number:
@@ -57,33 +72,55 @@ blueprint:
           mode: slider
 
     night_mode_enabled:
-      name: Enable Night Mode
+      name: Enable Night Mode / Nachtmodus aktivieren
       description: >
         When enabled: the door locks automatically at night mode start, unlocks
         at night mode end (if someone is home), and auto-unlock on arrival is
         suppressed during the night window. People at home still receive a
         notification during night mode and can open the door manually.
+        | Wenn aktiviert: Tür sperrt automatisch zu Beginn des Nachtmodus,
+        entsperrt am Ende (wenn jemand zu Hause ist), und automatisches
+        Entsperren bei Ankunft wird unterdrückt. Personen zu Hause erhalten
+        weiterhin eine Benachrichtigung und können die Tür manuell öffnen.
       default: false
       selector:
         boolean:
 
     night_mode_start:
-      name: Night Mode Start
+      name: Night Mode Start / Nachtmodus Beginn
       description: >
         Time at which night mode begins. The door is locked automatically at
         this time and auto-unlock on arrival is disabled.
+        | Uhrzeit, zu der der Nachtmodus beginnt. Die Tür wird automatisch
+        gesperrt und das automatische Entsperren bei Ankunft deaktiviert.
       default: "22:00:00"
       selector:
         time:
 
     night_mode_end:
-      name: Night Mode End
+      name: Night Mode End / Nachtmodus Ende
       description: >
         Time at which night mode ends. The door is unlocked automatically at
         this time if at least one tracked person is home.
+        | Uhrzeit, zu der der Nachtmodus endet. Die Tür wird automatisch
+        entsperrt, wenn mindestens eine überwachte Person zu Hause ist.
       default: "07:00:00"
       selector:
         time:
+
+    language:
+      name: Language / Sprache
+      description: >
+        Language used for push notifications.
+        | Sprache für Push-Benachrichtigungen.
+      default: "de"
+      selector:
+        select:
+          options:
+            - label: "Deutsch (German)"
+              value: "de"
+            - label: "English"
+              value: "en"
 
 variables:
   lock_entity: !input lock_entity
@@ -92,11 +129,20 @@ variables:
   night_mode_enabled: !input night_mode_enabled
   night_mode_start: !input night_mode_start
   night_mode_end: !input night_mode_end
+  language: !input language
 
 trigger:
+  # Split into two precise triggers so that intermediate GPS state changes
+  # (e.g. not_home → away → not_home) never fire the automation and cannot
+  # cancel a running lock-delay.
   - platform: state
     entity_id: !input people
-    id: person_state_change
+    to: "home"
+    id: arrived_home
+  - platform: state
+    entity_id: !input people
+    from: "home"
+    id: left_home
   - platform: time
     at: !input night_mode_start
     id: night_mode_start
@@ -114,9 +160,7 @@ condition: []
 action:
   - variables:
       triggered_person: "{{ trigger.entity_id if trigger.entity_id is defined else '' }}"
-      new_state: "{{ trigger.to_state.state if trigger.to_state is defined and trigger.to_state is not none else '' }}"
-      old_state: "{{ trigger.from_state.state if trigger.from_state is defined and trigger.from_state is not none else '' }}"
-      # List of people currently in the home zone (includes the newly arrived person)
+      # List of people currently in the home zone
       home_people: >
         {% set ns = namespace(result=[]) %}
         {% for p in people %}
@@ -127,9 +171,13 @@ action:
         {{ ns.result }}
       # True when nobody from the tracked list is home
       all_away: "{{ home_people | length == 0 }}"
+      # Use {{ false }} / {{ true }} so Home Assistant stores a proper Python
+      # bool, not the literal string "false" which is evaluated as True
+      # (non-empty string) in Jinja2 and would break every condition that
+      # checks `not is_night_mode`.
       is_night_mode: >
         {% if not night_mode_enabled %}
-          false
+          {{ false }}
         {% else %}
           {# Time strings are zero-padded HH:MM:SS, so lexicographic comparison
              is equivalent to chronological comparison for 24-hour clock values. #}
@@ -146,17 +194,40 @@ action:
         {% else %}
           time_trigger
         {% endif %}
+      # ── Localized notification strings ────────────────────────────────────
+      notif_title: >
+        {% if language == 'de' %}
+          {{ triggered_name }} ist zu Hause
+        {% else %}
+          {{ triggered_name }} is home
+        {% endif %}
+      notif_message: >
+        {% if language == 'de' %}
+          {{ triggered_name }} ist gerade nach Hause gekommen.
+          {%- if is_night_mode | bool %} Nachtmodus ist aktiv – die Tür wurde nicht automatisch entsperrt.{%- endif %}
+          Tür jetzt öffnen?
+        {% else %}
+          {{ triggered_name }} just arrived.
+          {%- if is_night_mode | bool %} Night mode is active – the door was not unlocked automatically.{%- endif %}
+          Open the door now?
+        {% endif %}
+      notif_action_title: >
+        {% if language == 'de' %}
+          Tür öffnen
+        {% else %}
+          Open Door
+        {% endif %}
 
   - choose:
       # ── Someone arrived home ─────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: "{{ new_state == 'home' and old_state != 'home' }}"
+            value_template: "{{ trigger.id == 'arrived_home' }}"
         sequence:
           # Unlock the door unless night mode is active
           - if:
               - condition: template
-                value_template: "{{ not is_night_mode }}"
+                value_template: "{{ not (is_night_mode | bool) }}"
             then:
               - action: lock.unlock
                 target:
@@ -170,23 +241,20 @@ action:
             data:
               persons:
                 - "{{ triggered_person }}"
-              title: "{{ triggered_name }} is home"
-              message: >
-                {{ triggered_name }} just arrived.
-                {%- if is_night_mode %} Night mode is active – the door was not unlocked automatically.{%- endif %}
-                Open the door now?
+              title: "{{ notif_title }}"
+              message: "{{ notif_message }}"
               data:
                 sticky: true
                 persistent: true
                 tag: door_arrival_notification
                 actions:
                   - action: OPEN_DOOR_NOW
-                    title: "Open Door"
+                    title: "{{ notif_action_title }}"
 
       # ── Someone left home ────────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: "{{ new_state != 'home' and old_state == 'home' }}"
+            value_template: "{{ trigger.id == 'left_home' }}"
         sequence:
           # Dismiss the arrival notification only for the person who left
           - action: script.notify_people
@@ -218,7 +286,7 @@ action:
 
               - if:
                   - condition: template
-                    value_template: "{{ still_all_away }}"
+                    value_template: "{{ still_all_away | bool }}"
                 then:
                   - action: lock.lock
                     target:

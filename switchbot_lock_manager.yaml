@@ -160,21 +160,23 @@ condition: []
 action:
   - variables:
       triggered_person: "{{ trigger.entity_id if trigger.entity_id is defined else '' }}"
-      # List of people currently in the home zone
-      home_people: >
-        {% set ns = namespace(result=[]) %}
+      # True when nobody from the tracked list is home.
+      # Computed directly with a namespace to avoid the string-length trap:
+      # rendering a Jinja2 list with {{ ns.result }} produces a string like
+      # "['person.john']", and then `| length` returns the string length
+      # (always > 0), making every derived boolean incorrect.
+      all_away: >
+        {% set ns = namespace(all_away=true) %}
         {% for p in people %}
           {% if is_state(p, 'home') %}
-            {% set ns.result = ns.result + [p] %}
+            {% set ns.all_away = false %}
           {% endif %}
         {% endfor %}
-        {{ ns.result }}
-      # True when nobody from the tracked list is home
-      all_away: "{{ home_people | length == 0 }}"
+        {{ ns.all_away }}
       # Use {{ false }} / {{ true }} so Home Assistant stores a proper Python
       # bool, not the literal string "false" which is evaluated as True
       # (non-empty string) in Jinja2 and would break every condition that
-      # checks `not is_night_mode`.
+      # checks `not (is_night_mode | bool)`.
       is_night_mode: >
         {% if not night_mode_enabled %}
           {{ false }}
@@ -268,7 +270,7 @@ action:
           # Start the auto-lock timer only when all people are now away
           - if:
               - condition: template
-                value_template: "{{ all_away }}"
+                value_template: "{{ all_away | bool }}"
             then:
               - delay:
                   minutes: "{{ lock_delay | int }}"
@@ -304,7 +306,7 @@ action:
       # ── Night mode ended – unlock if someone is home ──────────────────────
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'night_mode_end' and night_mode_enabled and not all_away }}"
+            value_template: "{{ trigger.id == 'night_mode_end' and night_mode_enabled and not (all_away | bool) }}"
         sequence:
           - action: lock.unlock
             target:

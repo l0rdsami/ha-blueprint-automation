@@ -1,21 +1,27 @@
 blueprint:
   name: "Presence & TV Room Lighting"
   description: >
-    Smart room lighting that combines presence zones and TV state.
+    Non-blocking, event-driven room lighting that combines presence zones and
+    TV state. Every state transition is driven by a real HA event — no
+    blocking wait loops inside the automation.
 
-    • Motion detected → dim scene activated immediately.
-    • Presence sustained through the ramp-up dwell time → bright scene (day or
-      night based on a configurable time window) with a configurable transition.
-    • TV starts playing → TV scene activated. If a couch sensor is configured,
-      leaving the couch pauses the TV and returns to bright.
-      TV pausing / stopping also returns to bright.
-    • All presence clears → dim scene re-activated for the ramp-up dwell time
-      (mirrors the ramp-up wait), then an additional off-wait, then lights off.
-    • TV entity and couch sensor are both optional; the blueprint degrades
-      gracefully when either is omitted.
-    • All light states are driven by scenes so you can freely combine brightness
-      and colour temperature. Lights to turn off are inferred from the entities
-      listed in the dim scene.
+    Before using this blueprint, create two Timer helpers
+    (Settings → Devices & Services → Helpers → Add Helper → Timer).
+    Their names are free-form; you select them as inputs below.
+
+    • Motion detected → dim scene on; ramp-up timer started.
+    • Ramp-up timer finishes with presence → bright scene (day or night).
+    • New motion at any time → extends / resets the ramp-up timer; returns
+      from wind-down to dim + restarts the timer automatically.
+    • TV starts playing (while bright) → TV scene activated.
+    • Couch left while TV playing → TV paused, bright scene restored.
+    • TV pauses / stops while in TV mode → bright scene restored.
+    • All presence clears → dim scene on, TV paused; ramp-up timer reused
+      as the wind-down dim timer.
+    • Wind-down timer finishes with no presence → off-wait timer started.
+    • Off-wait timer finishes → lights turned off with transition.
+
+    TV entity and couch sensor are both optional and can be left empty.
   homeassistant:
     min_version: 2023.8.0
   domain: automation
@@ -114,6 +120,32 @@ blueprint:
             - domain: scene
           multiple: false
 
+    ramp_up_timer:
+      name: Ramp-up / Wind-down Timer
+      description: >
+        A Timer helper used for the dim → bright ramp-up delay and, when
+        presence clears, for the wind-down dim phase (same duration).
+        Create it via Settings → Helpers → Add Helper → Timer. The duration
+        configured below is passed to the timer each time it is started, so
+        the helper's own default duration does not matter.
+      selector:
+        entity:
+          filter:
+            - domain: timer
+          multiple: false
+
+    off_wait_timer:
+      name: Off-wait Timer
+      description: >
+        A Timer helper used for the final off-wait phase after presence
+        clears and the wind-down dim phase ends. Create it via Settings →
+        Helpers → Add Helper → Timer.
+      selector:
+        entity:
+          filter:
+            - domain: timer
+          multiple: false
+
     ramp_up_wait:
       name: Ramp-up Dwell Time (seconds)
       description: >
@@ -146,7 +178,7 @@ blueprint:
     off_wait:
       name: Off Wait Time (seconds)
       description: >
-        Additional time to stay in dim mode after the ramp-up dwell period
+        Additional time to stay in dim mode after the wind-down dim phase
         elapses before turning the lights off.
       default: 60
       selector:
@@ -199,215 +231,270 @@ variables:
   tv_scene: !input tv_scene
   day_start: !input day_start
   day_end: !input day_end
+  ramp_up_timer: !input ramp_up_timer
+  off_wait_timer: !input off_wait_timer
 
 trigger:
+  # Any presence sensor becomes active
   - platform: state
     entity_id: !input presence_sensors
     to: 'on'
     id: motion_on
 
+  # All presence sensors have been off for 2 s (debounced)
+  - platform: template
+    value_template: >
+      {% set ns = namespace(all_off=true) %}
+      {% for e in presence_sensors %}
+        {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
+      {% endfor %}
+      {{ ns.all_off }}
+    for:
+      seconds: 2
+    id: all_presence_off
+
+  # TV starts playing
+  - platform: state
+    entity_id: !input tv_entity
+    to: 'playing'
+    id: tv_started
+
+  # TV stops / pauses (leaves 'playing')
+  - platform: state
+    entity_id: !input tv_entity
+    from: 'playing'
+    id: tv_stopped
+
+  # Couch sensor reports unoccupied
+  - platform: state
+    entity_id: !input couch_sensor
+    to: 'off'
+    id: couch_left
+
+  # Ramp-up timer (also used as wind-down dim timer) expires
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input ramp_up_timer
+    id: ramp_up_done
+
+  # Off-wait timer expires → time to turn the lights off
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input off_wait_timer
+    id: off_wait_done
+
 condition: []
 
 action:
-  # ── Phase 1: Dim ──────────────────────────────────────────────────────────
-  - alias: "Activate dim scene on motion"
-    action: scene.turn_on
-    target:
-      entity_id: !input dim_scene
+  # Compute shared runtime values once so every branch can reference them.
+  - variables:
+      any_presence_on: >
+        {% set ns = namespace(any_on=false) %}
+        {% for e in presence_sensors %}
+          {% if is_state(e, 'on') %}{% set ns.any_on = true %}{% endif %}
+        {% endfor %}
+        {{ ns.any_on }}
+      lights_on: >
+        {% set lights = (state_attr(dim_scene, 'entity_id') | default([]))
+           | select('match', '^light\.') | list %}
+        {{ lights | map('states') | select('eq', 'on') | list | length > 0 }}
+      bright_scene: >
+        {%- set t = now().strftime('%H:%M:%S') -%}
+        {%- if day_start <= day_end -%}
+          {%- if t >= day_start and t < day_end -%}{{ bright_day_scene }}{%- else -%}{{ bright_night_scene }}{%- endif -%}
+        {%- else -%}
+          {%- if t >= day_start or t < day_end -%}{{ bright_day_scene }}{%- else -%}{{ bright_night_scene }}{%- endif -%}
+        {%- endif -%}
 
-  # ── Phase 2: Ramp-up dwell timer ──────────────────────────────────────────
-  # Wait for either all sensors to clear (trigger fires → wait.completed=true)
-  # or the dwell time to expire (timeout → wait.completed=false).
-  - alias: "Wait for ramp-up dwell time"
-    wait_for_trigger:
-      - platform: template
-        value_template: >
-          {% set ns = namespace(all_off=true) %}
-          {% for e in presence_sensors %}
-            {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
-          {% endfor %}
-          {{ ns.all_off }}
-        for:
-          seconds: 2
-    timeout:
-      seconds: !input ramp_up_wait
-    continue_on_timeout: true
+  - choose:
 
-  # ── Phase 3: Bright mode ───────────────────────────────────────────────────
-  # Entered only when presence was sustained through the dwell time (timeout).
-  - alias: "Enter bright mode when dwell time elapsed with presence"
-    if:
-      - condition: template
-        value_template: "{{ not wait.completed }}"
-    then:
-      - alias: "Activate correct bright scene (day / night)"
-        action: scene.turn_on
-        target:
-          entity_id: >
-            {% set t = now().strftime('%H:%M:%S') %}
-            {% if day_start <= day_end %}
-              {% if t >= day_start and t < day_end %}
-                {{ bright_day_scene }}
-              {% else %}
-                {{ bright_night_scene }}
-              {% endif %}
-            {% else %}
-              {% if t >= day_start or t < day_end %}
-                {{ bright_day_scene }}
-              {% else %}
-                {{ bright_night_scene }}
-              {% endif %}
-            {% endif %}
-        data:
-          transition: !input ramp_up_transition
+    # ── MOTION ON ──────────────────────────────────────────────────────────────
+    # New presence detected. Behaviour depends on which phase we are in, inferred
+    # from which timer is currently active.
+    - conditions:
+        - condition: trigger
+          id: motion_on
+      sequence:
+        - choose:
+          # Off-wait phase → cancel off timer, re-enter dim and restart ramp-up
+          - conditions:
+              - condition: template
+                value_template: "{{ is_state(off_wait_timer, 'active') }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id: !input off_wait_timer
+              - action: scene.turn_on
+                target:
+                  entity_id: !input dim_scene
+              - action: timer.start
+                target:
+                  entity_id: !input ramp_up_timer
+                data:
+                  duration: !input ramp_up_wait
 
-      # ── Phase 4: Monitor loop ───────────────────────────────────────────────
-      - alias: "Bright mode monitor loop"
-        repeat:
-          while:
-            - alias: "Continue while any presence sensor is active"
-              condition: template
-              value_template: >
-                {% set ns = namespace(any_on=false) %}
-                {% for e in presence_sensors %}
-                  {% if is_state(e, 'on') %}{% set ns.any_on = true %}{% endif %}
-                {% endfor %}
-                {{ ns.any_on }}
-          sequence:
-            - alias: "Wait for presence to clear or TV to start"
-              wait_for_trigger:
-                - platform: template
-                  value_template: >
-                    {% set ns = namespace(all_off=true) %}
-                    {% for e in presence_sensors %}
-                      {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
-                    {% endfor %}
-                    {{ ns.all_off }}
-                  for:
-                    seconds: 2
-                  id: presence_cleared
-                - platform: template
-                  value_template: >
-                    {{ tv_entity != '' and is_state(tv_entity, 'playing') }}
-                  id: tv_started
-              timeout:
-                minutes: 5
-              continue_on_timeout: true
+          # Ramp-up or wind-down dim phase → extend the running timer
+          - conditions:
+              - condition: template
+                value_template: "{{ is_state(ramp_up_timer, 'active') }}"
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: !input ramp_up_timer
+                data:
+                  duration: !input ramp_up_wait
 
-            # ── TV Mode ──────────────────────────────────────────────────────
-            - alias: "Enter TV mode when TV starts playing"
-              if:
+          # Idle (no timers, lights off) → start a fresh dim cycle
+          - conditions:
+              - condition: template
+                value_template: "{{ not lights_on }}"
+            sequence:
+              - action: scene.turn_on
+                target:
+                  entity_id: !input dim_scene
+              - action: timer.start
+                target:
+                  entity_id: !input ramp_up_timer
+                data:
+                  duration: !input ramp_up_wait
+
+          # Bright / TV mode → already lit, nothing to change
+
+    # ── ALL PRESENCE OFF ───────────────────────────────────────────────────────
+    # Guard: only act when the automation is in an active cycle (lights on or
+    # ramp-up timer running). This prevents spurious firing at HA startup.
+    - conditions:
+        - condition: trigger
+          id: all_presence_off
+        - condition: template
+          value_template: "{{ lights_on or is_state(ramp_up_timer, 'active') }}"
+      sequence:
+        - choose:
+          # Still in the initial dim / ramp-up phase → reuse the same timer as
+          # the wind-down dim timer (dim scene already active, no scene change)
+          - conditions:
+              - condition: template
+                value_template: "{{ is_state(ramp_up_timer, 'active') }}"
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: !input ramp_up_timer
+                data:
+                  duration: !input ramp_up_wait
+
+          # Bright or TV mode → switch to dim, pause TV, start wind-down timer
+          default:
+            - action: scene.turn_on
+              target:
+                entity_id: !input dim_scene
+              data:
+                transition: !input ramp_up_transition
+            - if:
                 - condition: template
-                  value_template: >
-                    {{ wait.trigger is not none and wait.trigger.id == 'tv_started' }}
+                  value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
               then:
-                - alias: "Activate TV scene if configured"
-                  if:
-                    - condition: template
-                      value_template: "{{ tv_scene != '' }}"
-                  then:
-                    - action: scene.turn_on
-                      target:
-                        entity_id: !input tv_scene
+                - action: media_player.media_pause
+                  target:
+                    entity_id: !input tv_entity
+            - action: timer.start
+              target:
+                entity_id: !input ramp_up_timer
+              data:
+                duration: !input ramp_up_wait
 
-                - alias: "Wait for TV mode exit: couch left, TV stops, or all presence gone"
-                  wait_for_trigger:
-                    - platform: template
-                      value_template: >
-                        {{ couch_sensor != '' and is_state(couch_sensor, 'off') }}
-                      for:
-                        seconds: 2
-                      id: couch_left
-                    - platform: template
-                      value_template: >
-                        {{ tv_entity != '' and not is_state(tv_entity, 'playing') }}
-                      for:
-                        seconds: 5
-                      id: tv_not_playing
-                    - platform: template
-                      value_template: >
-                        {% set ns = namespace(all_off=true) %}
-                        {% for e in presence_sensors %}
-                          {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
-                        {% endfor %}
-                        {{ ns.all_off }}
-                      for:
-                        seconds: 2
-                      id: all_presence_off
+    # ── RAMP-UP / WIND-DOWN DIM TIMER DONE ────────────────────────────────────
+    - conditions:
+        - condition: trigger
+          id: ramp_up_done
+      sequence:
+        - choose:
+          # Presence still active → ramp-up dwell satisfied, go bright
+          - conditions:
+              - condition: template
+                value_template: "{{ any_presence_on }}"
+            sequence:
+              - action: scene.turn_on
+                target:
+                  entity_id: "{{ bright_scene }}"
+                data:
+                  transition: !input ramp_up_transition
 
-                - alias: "Pause TV when couch is left"
-                  if:
-                    - condition: template
-                      value_template: >
-                        {{ wait.trigger is not none
-                           and wait.trigger.id == 'couch_left'
-                           and tv_entity != '' }}
-                  then:
-                    - action: media_player.media_pause
-                      target:
-                        entity_id: !input tv_entity
+          # No presence → wind-down dim phase complete, start off-wait
+          default:
+            - action: timer.start
+              target:
+                entity_id: !input off_wait_timer
+              data:
+                duration: !input off_wait
 
-                - alias: "Restore bright scene if presence still detected"
-                  if:
-                    - condition: template
-                      value_template: >
-                        {{ wait.trigger is not none
-                           and wait.trigger.id != 'all_presence_off' }}
-                  then:
-                    - action: scene.turn_on
-                      target:
-                        entity_id: >
-                          {% set t = now().strftime('%H:%M:%S') %}
-                          {% if day_start <= day_end %}
-                            {% if t >= day_start and t < day_end %}
-                              {{ bright_day_scene }}
-                            {% else %}
-                              {{ bright_night_scene }}
-                            {% endif %}
-                          {% else %}
-                            {% if t >= day_start or t < day_end %}
-                              {{ bright_day_scene }}
-                            {% else %}
-                              {{ bright_night_scene }}
-                            {% endif %}
-                          {% endif %}
-                      data:
-                        transition: !input ramp_up_transition
+    # ── TV STARTED ─────────────────────────────────────────────────────────────
+    # Only enter TV mode while we are in bright mode (no timer running, lights on)
+    - conditions:
+        - condition: trigger
+          id: tv_started
+        - condition: template
+          value_template: >
+            {{ not is_state(ramp_up_timer, 'active')
+               and not is_state(off_wait_timer, 'active')
+               and lights_on }}
+      sequence:
+        - if:
+            - condition: template
+              value_template: "{{ tv_scene != '' }}"
+          then:
+            - action: scene.turn_on
+              target:
+                entity_id: !input tv_scene
 
-  # ── Phase 5: Dim-out ──────────────────────────────────────────────────────
-  - alias: "Re-activate dim scene for wind-down"
-    action: scene.turn_on
-    target:
-      entity_id: !input dim_scene
-    data:
-      transition: !input ramp_up_transition
+    # ── TV STOPPED ─────────────────────────────────────────────────────────────
+    # TV left 'playing' while in bright/TV mode → restore the bright scene
+    - conditions:
+        - condition: trigger
+          id: tv_stopped
+        - condition: template
+          value_template: >
+            {{ not is_state(ramp_up_timer, 'active')
+               and not is_state(off_wait_timer, 'active')
+               and lights_on }}
+      sequence:
+        - action: scene.turn_on
+          target:
+            entity_id: "{{ bright_scene }}"
+          data:
+            transition: !input ramp_up_transition
 
-  - alias: "Pause TV if still playing when all presence has cleared"
-    if:
-      - condition: template
-        value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
-    then:
-      - action: media_player.media_pause
-        target:
-          entity_id: !input tv_entity
+    # ── COUCH LEFT ─────────────────────────────────────────────────────────────
+    # Only act if the TV is actually playing (i.e. we are in TV mode)
+    - conditions:
+        - condition: trigger
+          id: couch_left
+        - condition: template
+          value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
+      sequence:
+        - action: media_player.media_pause
+          target:
+            entity_id: !input tv_entity
+        - action: scene.turn_on
+          target:
+            entity_id: "{{ bright_scene }}"
+          data:
+            transition: !input ramp_up_transition
 
-  - alias: "Dim-out wait — mirrors the ramp-up dwell time"
-    delay:
-      seconds: !input ramp_up_wait
+    # ── OFF-WAIT TIMER DONE → LIGHTS OFF ──────────────────────────────────────
+    - conditions:
+        - condition: trigger
+          id: off_wait_done
+      sequence:
+        - action: light.turn_off
+          target:
+            entity_id: >
+              {{ (state_attr(dim_scene, 'entity_id') | default([]))
+                 | select('match', '^light\.')
+                 | list }}
+          data:
+            transition: !input off_transition
 
-  - alias: "Additional off-wait"
-    delay:
-      seconds: !input off_wait
-
-  - alias: "Turn off all lights inferred from the dim scene"
-    action: light.turn_off
-    target:
-      entity_id: >
-        {{ (state_attr(dim_scene, 'entity_id') | default([]))
-           | select('match', '^light\.')
-           | list }}
-    data:
-      transition: !input off_transition
-
-mode: restart
+mode: parallel
 max_exceeded: silent

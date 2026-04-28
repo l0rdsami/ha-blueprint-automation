@@ -1,0 +1,418 @@
+blueprint:
+  name: "Presence & TV Room Lighting"
+  description: >
+    Non-blocking, event-driven room lighting that combines presence zones and
+    TV state. No helper entities are needed — all timing is handled via the
+    native `for:` option on triggers. Every trigger fires independently and
+    executes only its own immediate action.
+
+    • Motion detected → dim scene activated immediately.
+    • Presence sustained for the ramp-up dwell time → bright scene (day or
+      night based on a configurable time window) with a configurable transition.
+    • TV starts playing (while bright and presence active) → TV scene activated.
+    • Couch left while TV playing → TV paused, bright scene restored.
+    • TV pauses / stops while in TV mode → bright scene restored.
+    • All presence clears → dim scene on, TV paused immediately (2 s debounce).
+    • Presence absent for ramp-up dwell + off-wait → lights turn off.
+
+    TV entity and couch sensor are both optional and can be left empty.
+  homeassistant:
+    min_version: 2023.8.0
+  domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/presence_tv_light.yaml
+
+  input:
+    presence_sensors:
+      name: Presence / Motion Sensors
+      description: >
+        One or more presence or motion binary sensors (or groups). Any sensor
+        switching to 'on' starts or restarts the lighting cycle.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - occupancy
+                - motion
+            - domain: group
+          multiple: true
+
+    couch_sensor:
+      name: Couch Presence Sensor (optional)
+      description: >
+        Presence sensor for the couch / sofa zone. Only used while TV mode is
+        already active. Leaving the couch exits TV mode and pauses the TV.
+        Leave empty to skip the couch check entirely (TV mode exits only when
+        the TV stops or all presence clears).
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - occupancy
+                - motion
+          multiple: false
+
+    tv_entity:
+      name: TV / Media Player (optional)
+      description: >
+        Media player entity for the room. TV mode is entered when the player
+        reaches 'playing' state. Leave empty to disable TV mode entirely.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+          multiple: false
+
+    dim_scene:
+      name: Dim Scene
+      description: >
+        Scene for initial / dim lighting. Activated immediately on motion and
+        again during wind-down. All light entities listed in this scene are
+        used to determine which lights to turn off at the end of the cycle.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    bright_day_scene:
+      name: Bright Day Scene
+      description: >
+        Scene for full-brightness lighting during daytime hours. Activated
+        once presence has been sustained for the ramp-up dwell time and the
+        current time falls within the day window.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    bright_night_scene:
+      name: Bright Night Scene
+      description: >
+        Scene for full-brightness lighting during nighttime hours. Activated
+        once presence has been sustained for the ramp-up dwell time and the
+        current time is outside the day window.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    tv_scene:
+      name: TV Scene (optional)
+      description: >
+        Scene activated when TV mode is entered. Leave empty to keep the
+        current bright scene during TV playback.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    ramp_up_wait:
+      name: Ramp-up Dwell Time (seconds)
+      description: >
+        How long presence must be continuously detected before lights transition
+        from dim to bright. The same duration is reused as the dim phase during
+        wind-down before the off-wait begins.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    ramp_up_transition:
+      name: Ramp-up Transition Time (seconds)
+      description: >
+        Transition duration when switching from dim to bright (and when
+        returning from TV mode to bright).
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    off_wait:
+      name: Off Wait Time (seconds)
+      description: >
+        Additional time to stay in dim mode after the wind-down dim phase
+        elapses before turning the lights off.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    off_transition:
+      name: Turn-off Transition Time (seconds)
+      description: >
+        Transition duration when turning the lights off.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    day_start:
+      name: Day Mode Start Time
+      description: >
+        Start of the daytime window. The bright day scene is used between this
+        time and the day mode end time. Set start later than end for an
+        overnight day window (e.g. 20:00 → 06:00).
+      default: "07:00:00"
+      selector:
+        time: {}
+
+    day_end:
+      name: Day Mode End Time
+      description: >
+        End of the daytime window. The bright night scene is used outside
+        this window.
+      default: "22:00:00"
+      selector:
+        time: {}
+
+trigger_variables:
+  _presence_sensors: !input presence_sensors
+  _tv_entity: !input tv_entity
+  _couch_sensor: !input couch_sensor
+  _ramp_up_wait: !input ramp_up_wait
+  _off_wait: !input off_wait
+
+variables:
+  presence_sensors: !input presence_sensors
+  tv_entity: !input tv_entity
+  couch_sensor: !input couch_sensor
+  dim_scene: !input dim_scene
+  bright_day_scene: !input bright_day_scene
+  bright_night_scene: !input bright_night_scene
+  tv_scene: !input tv_scene
+  day_start: !input day_start
+  day_end: !input day_end
+
+trigger:
+  # Any presence sensor turns on — start / restart the dim phase
+  - platform: state
+    entity_id: !input presence_sensors
+    to: 'on'
+    id: motion_on
+
+  # Any presence sensor has been on for the full ramp-up dwell → go bright
+  - platform: state
+    entity_id: !input presence_sensors
+    to: 'on'
+    for:
+      hours: 0
+      minutes: 0
+      seconds: !input ramp_up_wait
+    id: ramp_up_done
+
+  # All presence sensors off for 2 s (debounced) → begin wind-down
+  - platform: template
+    value_template: >
+      {{ expand(_presence_sensors) | selectattr('state', 'eq', 'on') | list | length == 0 }}
+    for:
+      hours: 0
+      minutes: 0
+      seconds: 2
+    id: all_presence_off
+
+  # All presence absent for ramp-up dwell + off-wait → turn lights off
+  - platform: template
+    value_template: >
+      {{ expand(_presence_sensors) | selectattr('state', 'eq', 'on') | list | length == 0 }}
+    for:
+      hours: 0
+      minutes: 0
+      seconds: "{{ _ramp_up_wait | int + _off_wait | int }}"
+    id: off_wait_done
+
+  # TV starts playing
+  - platform: state
+    entity_id: !input tv_entity
+    to: 'playing'
+    id: tv_started
+
+  # TV stops / pauses — debounce 5 s to ignore brief buffering pauses
+  - platform: state
+    entity_id: !input tv_entity
+    from: 'playing'
+    for:
+      hours: 0
+      minutes: 0
+      seconds: 5
+    id: tv_stopped
+
+  # Couch sensor clears — debounce 2 s
+  - platform: state
+    entity_id: !input couch_sensor
+    to: 'off'
+    for:
+      hours: 0
+      minutes: 0
+      seconds: 2
+    id: couch_left
+
+condition: []
+
+action:
+  # Compute shared runtime values once; all branches reference these variables.
+  - variables:
+      any_presence_on: >
+        {% set ns = namespace(any_on=false) %}
+        {% for e in presence_sensors %}
+          {% if is_state(e, 'on') %}{% set ns.any_on = true %}{% endif %}
+        {% endfor %}
+        {{ ns.any_on }}
+      lights_on: >
+        {% set lights = (state_attr(dim_scene, 'entity_id') | default([]))
+           | select('match', '^light\.') | list %}
+        {{ lights | map('states') | select('eq', 'on') | list | length > 0 }}
+      bright_scene: >
+        {%- set t = now().strftime('%H:%M:%S') -%}
+        {%- if day_start <= day_end -%}
+          {%- if t >= day_start and t < day_end -%}{{ bright_day_scene }}{%- else -%}{{ bright_night_scene }}{%- endif -%}
+        {%- else -%}
+          {%- if t >= day_start or t < day_end -%}{{ bright_day_scene }}{%- else -%}{{ bright_night_scene }}{%- endif -%}
+        {%- endif -%}
+
+  - choose:
+
+    # ── MOTION ON ──────────────────────────────────────────────────────────────
+    # Only activate the dim scene if the lights are currently off (idle state).
+    # If lights are already on in any mode (dim, bright, or TV) nothing changes
+    # here; the ramp_up_done trigger will advance to bright when the dwell
+    # time has elapsed.
+    - conditions:
+        - condition: trigger
+          id: motion_on
+        - condition: template
+          value_template: "{{ not lights_on }}"
+      sequence:
+        - action: scene.turn_on
+          target:
+            entity_id: !input dim_scene
+
+    # ── RAMP-UP DONE ───────────────────────────────────────────────────────────
+    # A presence sensor has been continuously 'on' for the full dwell time.
+    # Go bright, unless the TV is already playing (TV mode takes priority).
+    - conditions:
+        - condition: trigger
+          id: ramp_up_done
+        - condition: template
+          value_template: >
+            {{ any_presence_on
+               and not (tv_entity != '' and is_state(tv_entity, 'playing')) }}
+      sequence:
+        - action: scene.turn_on
+          target:
+            entity_id: "{{ bright_scene }}"
+          data:
+            transition: !input ramp_up_transition
+
+    # ── ALL PRESENCE OFF ───────────────────────────────────────────────────────
+    # All sensors have been off for 2 s. Switch to dim and pause the TV.
+    # Guard: lights must be on so this does not fire spuriously at HA startup.
+    - conditions:
+        - condition: trigger
+          id: all_presence_off
+        - condition: template
+          value_template: "{{ lights_on }}"
+      sequence:
+        - action: scene.turn_on
+          target:
+            entity_id: !input dim_scene
+          data:
+            transition: !input ramp_up_transition
+        - if:
+            - condition: template
+              value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
+          then:
+            - action: media_player.media_pause
+              target:
+                entity_id: !input tv_entity
+
+    # ── OFF-WAIT DONE → LIGHTS OFF ─────────────────────────────────────────────
+    # All sensors absent for ramp_up_wait + off_wait seconds — turn off.
+    # Extra safety guard: do nothing if presence came back in the last instant.
+    - conditions:
+        - condition: trigger
+          id: off_wait_done
+        - condition: template
+          value_template: "{{ not any_presence_on }}"
+      sequence:
+        - action: light.turn_off
+          target:
+            entity_id: >
+              {{ (state_attr(dim_scene, 'entity_id') | default([]))
+                 | select('match', '^light\.')
+                 | list }}
+          data:
+            transition: !input off_transition
+
+    # ── TV STARTED ─────────────────────────────────────────────────────────────
+    # Enter TV mode only while lights are on and someone is present.
+    - conditions:
+        - condition: trigger
+          id: tv_started
+        - condition: template
+          value_template: "{{ lights_on and any_presence_on }}"
+      sequence:
+        - if:
+            - condition: template
+              value_template: "{{ tv_scene != '' }}"
+          then:
+            - action: scene.turn_on
+              target:
+                entity_id: !input tv_scene
+
+    # ── TV STOPPED ─────────────────────────────────────────────────────────────
+    # TV left 'playing' for 5 s — restore the appropriate bright scene.
+    - conditions:
+        - condition: trigger
+          id: tv_stopped
+        - condition: template
+          value_template: "{{ lights_on and any_presence_on }}"
+      sequence:
+        - action: scene.turn_on
+          target:
+            entity_id: "{{ bright_scene }}"
+          data:
+            transition: !input ramp_up_transition
+
+    # ── COUCH LEFT ─────────────────────────────────────────────────────────────
+    # Act only while the TV is actually playing (i.e. we are in TV mode).
+    - conditions:
+        - condition: trigger
+          id: couch_left
+        - condition: template
+          value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
+      sequence:
+        - action: media_player.media_pause
+          target:
+            entity_id: !input tv_entity
+        - action: scene.turn_on
+          target:
+            entity_id: "{{ bright_scene }}"
+          data:
+            transition: !input ramp_up_transition
+
+mode: parallel
+max_exceeded: silent

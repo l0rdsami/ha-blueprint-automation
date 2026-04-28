@@ -2,6 +2,7 @@ blueprint:
   name: Location Webhook Sender (Accuracy Support)
   description: Pushes Person or Tracker location with accuracy to a remote HA instance.
   domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/location_sender.yaml
   input:
     source_entity:
       name: Person or Tracker

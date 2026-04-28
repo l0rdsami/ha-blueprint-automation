@@ -2,6 +2,7 @@ blueprint:
   name: Light Link
   description: Link a light and a switch entity using the savedState Script
   domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/lightlink.yaml
   input:
     light_entity:
       name: Light

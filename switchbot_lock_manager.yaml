@@ -29,6 +29,7 @@ blueprint:
     interaktive Benachrichtigung. Ein optionaler Nachtmodus unterdrückt das
     automatische Entsperren während der Ruhezeiten.
   domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/switchbot_lock_manager.yaml
   homeassistant:
     min_version: 2023.8.0
 

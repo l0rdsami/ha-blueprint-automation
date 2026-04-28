@@ -404,7 +404,7 @@ action:
     action: light.turn_off
     target:
       entity_id: >
-        {{ state_attr(dim_scene, 'entity_id')
+        {{ (state_attr(dim_scene, 'entity_id') | default([]))
            | select('match', '^light\.')
            | list }}
     data:

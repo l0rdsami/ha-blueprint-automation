@@ -6,8 +6,8 @@ blueprint:
     • Motion detected → dim scene activated immediately.
     • Presence sustained through the ramp-up dwell time → bright scene (day or
       night based on a configurable time window) with a configurable transition.
-    • TV starts playing (optionally when the couch sensor is also occupied) →
-      TV scene activated. Leaving the couch pauses the TV and returns to bright.
+    • TV starts playing → TV scene activated. If a couch sensor is configured,
+      leaving the couch pauses the TV and returns to bright.
       TV pausing / stopping also returns to bright.
     • All presence clears → dim scene re-activated for the ramp-up dwell time
       (mirrors the ramp-up wait), then an additional off-wait, then lights off.
@@ -40,10 +40,10 @@ blueprint:
     couch_sensor:
       name: Couch Presence Sensor (optional)
       description: >
-        Presence sensor for the couch / sofa zone. When configured and
-        occupied, the TV starting will enter TV mode. Leaving the couch exits
-        TV mode and pauses the TV. Leave empty to enter TV mode based on TV
-        state alone (no couch check).
+        Presence sensor for the couch / sofa zone. Only used while TV mode is
+        already active. Leaving the couch exits TV mode and pauses the TV.
+        Leave empty to skip the couch check entirely (TV mode exits only when
+        the TV stops or all presence clears).
       default: ""
       selector:
         entity:

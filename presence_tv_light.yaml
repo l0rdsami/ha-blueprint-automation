@@ -1,0 +1,414 @@
+blueprint:
+  name: "Presence & TV Room Lighting"
+  description: >
+    Smart room lighting that combines presence zones and TV state.
+
+    • Motion detected → dim scene activated immediately.
+    • Presence sustained through the ramp-up dwell time → bright scene (day or
+      night based on a configurable time window) with a configurable transition.
+    • TV starts playing (optionally when the couch sensor is also occupied) →
+      TV scene activated. Leaving the couch pauses the TV and returns to bright.
+      TV pausing / stopping also returns to bright.
+    • All presence clears → dim scene re-activated for the ramp-up dwell time
+      (mirrors the ramp-up wait), then an additional off-wait, then lights off.
+    • TV entity and couch sensor are both optional; the blueprint degrades
+      gracefully when either is omitted.
+    • All light states are driven by scenes so you can freely combine brightness
+      and colour temperature. Lights to turn off are inferred from the entities
+      listed in the dim scene.
+  homeassistant:
+    min_version: 2023.8.0
+  domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/presence_tv_light.yaml
+
+  input:
+    presence_sensors:
+      name: Presence / Motion Sensors
+      description: >
+        One or more presence or motion binary sensors (or groups). Any sensor
+        switching to 'on' starts or restarts the lighting cycle.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - occupancy
+                - motion
+            - domain: group
+          multiple: true
+
+    couch_sensor:
+      name: Couch Presence Sensor (optional)
+      description: >
+        Presence sensor for the couch / sofa zone. When configured and
+        occupied, the TV starting will enter TV mode. Leaving the couch exits
+        TV mode and pauses the TV. Leave empty to enter TV mode based on TV
+        state alone (no couch check).
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - occupancy
+                - motion
+          multiple: false
+
+    tv_entity:
+      name: TV / Media Player (optional)
+      description: >
+        Media player entity for the room. TV mode is entered when the player
+        reaches 'playing' state. Leave empty to disable TV mode entirely.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+          multiple: false
+
+    dim_scene:
+      name: Dim Scene
+      description: >
+        Scene for initial / dim lighting. Activated immediately on motion and
+        again during wind-down. All light entities listed in this scene are
+        used to determine which lights to turn off at the end of the cycle.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    bright_day_scene:
+      name: Bright Day Scene
+      description: >
+        Scene for full-brightness lighting during daytime hours. Activated
+        once presence has been sustained for the ramp-up dwell time and the
+        current time falls within the day window.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    bright_night_scene:
+      name: Bright Night Scene
+      description: >
+        Scene for full-brightness lighting during nighttime hours. Activated
+        once presence has been sustained for the ramp-up dwell time and the
+        current time is outside the day window.
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    tv_scene:
+      name: TV Scene (optional)
+      description: >
+        Scene activated when TV mode is entered. Leave empty to keep the
+        current bright scene during TV playback.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+          multiple: false
+
+    ramp_up_wait:
+      name: Ramp-up Dwell Time (seconds)
+      description: >
+        How long presence must be continuously detected before lights transition
+        from dim to bright. The same duration is reused as the dim phase during
+        wind-down before the off-wait begins.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    ramp_up_transition:
+      name: Ramp-up Transition Time (seconds)
+      description: >
+        Transition duration when switching from dim to bright (and when
+        returning from TV mode to bright).
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    off_wait:
+      name: Off Wait Time (seconds)
+      description: >
+        Additional time to stay in dim mode after the ramp-up dwell period
+        elapses before turning the lights off.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    off_transition:
+      name: Turn-off Transition Time (seconds)
+      description: >
+        Transition duration when turning the lights off.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+          mode: slider
+          step: 1
+
+    day_start:
+      name: Day Mode Start Time
+      description: >
+        Start of the daytime window. The bright day scene is used between this
+        time and the day mode end time. Set start later than end for an
+        overnight day window (e.g. 20:00 → 06:00).
+      default: "07:00:00"
+      selector:
+        time: {}
+
+    day_end:
+      name: Day Mode End Time
+      description: >
+        End of the daytime window. The bright night scene is used outside
+        this window.
+      default: "22:00:00"
+      selector:
+        time: {}
+
+variables:
+  presence_sensors: !input presence_sensors
+  tv_entity: !input tv_entity
+  couch_sensor: !input couch_sensor
+  dim_scene: !input dim_scene
+  bright_day_scene: !input bright_day_scene
+  bright_night_scene: !input bright_night_scene
+  tv_scene: !input tv_scene
+  day_start: !input day_start
+  day_end: !input day_end
+
+trigger:
+  - platform: state
+    entity_id: !input presence_sensors
+    to: 'on'
+    id: motion_on
+
+condition: []
+
+action:
+  # ── Phase 1: Dim ──────────────────────────────────────────────────────────
+  - alias: "Activate dim scene on motion"
+    action: scene.turn_on
+    target:
+      entity_id: !input dim_scene
+
+  # ── Phase 2: Ramp-up dwell timer ──────────────────────────────────────────
+  # Wait for either all sensors to clear (trigger fires → wait.completed=true)
+  # or the dwell time to expire (timeout → wait.completed=false).
+  - alias: "Wait for ramp-up dwell time"
+    wait_for_trigger:
+      - platform: template
+        value_template: >
+          {% set ns = namespace(all_off=true) %}
+          {% for e in presence_sensors %}
+            {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
+          {% endfor %}
+          {{ ns.all_off }}
+        for:
+          seconds: 2
+    timeout:
+      seconds: !input ramp_up_wait
+    continue_on_timeout: true
+
+  # ── Phase 3: Bright mode ───────────────────────────────────────────────────
+  # Entered only when presence was sustained through the dwell time (timeout).
+  - alias: "Enter bright mode when dwell time elapsed with presence"
+    if:
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+    then:
+      - alias: "Activate correct bright scene (day / night)"
+        action: scene.turn_on
+        target:
+          entity_id: >
+            {% set t = now().strftime('%H:%M:%S') %}
+            {% if day_start <= day_end %}
+              {% if t >= day_start and t < day_end %}
+                {{ bright_day_scene }}
+              {% else %}
+                {{ bright_night_scene }}
+              {% endif %}
+            {% else %}
+              {% if t >= day_start or t < day_end %}
+                {{ bright_day_scene }}
+              {% else %}
+                {{ bright_night_scene }}
+              {% endif %}
+            {% endif %}
+        data:
+          transition: !input ramp_up_transition
+
+      # ── Phase 4: Monitor loop ───────────────────────────────────────────────
+      - alias: "Bright mode monitor loop"
+        repeat:
+          while:
+            - alias: "Continue while any presence sensor is active"
+              condition: template
+              value_template: >
+                {% set ns = namespace(any_on=false) %}
+                {% for e in presence_sensors %}
+                  {% if is_state(e, 'on') %}{% set ns.any_on = true %}{% endif %}
+                {% endfor %}
+                {{ ns.any_on }}
+          sequence:
+            - alias: "Wait for presence to clear or TV to start"
+              wait_for_trigger:
+                - platform: template
+                  value_template: >
+                    {% set ns = namespace(all_off=true) %}
+                    {% for e in presence_sensors %}
+                      {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
+                    {% endfor %}
+                    {{ ns.all_off }}
+                  for:
+                    seconds: 2
+                  id: presence_cleared
+                - platform: template
+                  value_template: >
+                    {{ tv_entity != '' and is_state(tv_entity, 'playing')
+                       and (couch_sensor == '' or is_state(couch_sensor, 'on')) }}
+                  id: tv_started
+              timeout:
+                minutes: 5
+              continue_on_timeout: true
+
+            # ── TV Mode ──────────────────────────────────────────────────────
+            - alias: "Enter TV mode when TV starts playing"
+              if:
+                - condition: template
+                  value_template: >
+                    {{ wait.trigger is not none and wait.trigger.id == 'tv_started' }}
+              then:
+                - alias: "Activate TV scene if configured"
+                  if:
+                    - condition: template
+                      value_template: "{{ tv_scene != '' }}"
+                  then:
+                    - action: scene.turn_on
+                      target:
+                        entity_id: !input tv_scene
+
+                - alias: "Wait for TV mode exit: couch left, TV stops, or all presence gone"
+                  wait_for_trigger:
+                    - platform: template
+                      value_template: >
+                        {{ couch_sensor != '' and is_state(couch_sensor, 'off') }}
+                      for:
+                        seconds: 2
+                      id: couch_left
+                    - platform: template
+                      value_template: >
+                        {{ tv_entity != '' and not is_state(tv_entity, 'playing') }}
+                      for:
+                        seconds: 5
+                      id: tv_not_playing
+                    - platform: template
+                      value_template: >
+                        {% set ns = namespace(all_off=true) %}
+                        {% for e in presence_sensors %}
+                          {% if is_state(e, 'on') %}{% set ns.all_off = false %}{% endif %}
+                        {% endfor %}
+                        {{ ns.all_off }}
+                      for:
+                        seconds: 2
+                      id: all_presence_off
+
+                - alias: "Pause TV when couch is left"
+                  if:
+                    - condition: template
+                      value_template: >
+                        {{ wait.trigger is not none
+                           and wait.trigger.id == 'couch_left'
+                           and tv_entity != '' }}
+                  then:
+                    - action: media_player.media_pause
+                      target:
+                        entity_id: !input tv_entity
+
+                - alias: "Restore bright scene if presence still detected"
+                  if:
+                    - condition: template
+                      value_template: >
+                        {{ wait.trigger is not none
+                           and wait.trigger.id != 'all_presence_off' }}
+                  then:
+                    - action: scene.turn_on
+                      target:
+                        entity_id: >
+                          {% set t = now().strftime('%H:%M:%S') %}
+                          {% if day_start <= day_end %}
+                            {% if t >= day_start and t < day_end %}
+                              {{ bright_day_scene }}
+                            {% else %}
+                              {{ bright_night_scene }}
+                            {% endif %}
+                          {% else %}
+                            {% if t >= day_start or t < day_end %}
+                              {{ bright_day_scene }}
+                            {% else %}
+                              {{ bright_night_scene }}
+                            {% endif %}
+                          {% endif %}
+                      data:
+                        transition: !input ramp_up_transition
+
+  # ── Phase 5: Dim-out ──────────────────────────────────────────────────────
+  - alias: "Re-activate dim scene for wind-down"
+    action: scene.turn_on
+    target:
+      entity_id: !input dim_scene
+    data:
+      transition: !input ramp_up_transition
+
+  - alias: "Pause TV if still playing when all presence has cleared"
+    if:
+      - condition: template
+        value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
+    then:
+      - action: media_player.media_pause
+        target:
+          entity_id: !input tv_entity
+
+  - alias: "Dim-out wait — mirrors the ramp-up dwell time"
+    delay:
+      seconds: !input ramp_up_wait
+
+  - alias: "Additional off-wait"
+    delay:
+      seconds: !input off_wait
+
+  - alias: "Turn off all lights inferred from the dim scene"
+    action: light.turn_off
+    target:
+      entity_id: >
+        {{ state_attr(dim_scene, 'entity_id')
+           | select('match', '^light\.')
+           | list }}
+    data:
+      transition: !input off_transition
+
+mode: restart
+max_exceeded: silent

@@ -5,6 +5,7 @@ blueprint:
     person source devices. Person priority is determined by input order.
     Each MAC maps to its own target device_tracker.
   domain: automation
+  source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/bluetooth_presence.yaml
 
   input:
     persons:

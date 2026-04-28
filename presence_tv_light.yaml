@@ -288,8 +288,7 @@ action:
                   id: presence_cleared
                 - platform: template
                   value_template: >
-                    {{ tv_entity != '' and is_state(tv_entity, 'playing')
-                       and (couch_sensor == '' or is_state(couch_sensor, 'on')) }}
+                    {{ tv_entity != '' and is_state(tv_entity, 'playing') }}
                   id: tv_started
               timeout:
                 minutes: 5

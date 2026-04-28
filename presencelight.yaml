@@ -197,6 +197,8 @@ action:
             {% if is_state(entity, 'on') %}{% set ns.all_off = false %}{% endif %}
           {% endfor %}
           {{ ns.all_off }}
+        for:
+          seconds: !input no_motion_wait
   - alias: Wait the no_motion_wait period
     delay:
       seconds: !input no_motion_wait
@@ -222,5 +224,5 @@ action:
   - alias: Wait until light transitioned
     delay: !input off_transition
 
-mode: restart
+mode: single
 max_exceeded: silent

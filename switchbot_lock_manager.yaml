@@ -109,6 +109,28 @@ blueprint:
       selector:
         time:
 
+    notification_action_id:
+      name: Notification Action ID / Benachrichtigungs-Aktions-ID
+      description: >
+        Action identifier used in the push notification button and the matching
+        mobile_app_notification_action trigger.
+        | Aktionskennung für den Push-Benachrichtigungsbutton und den
+        passenden mobile_app_notification_action-Trigger.
+      default: "OPEN_DOOR_NOW"
+      selector:
+        text:
+
+    nfc_tag_id:
+      name: NFC Tag ID / NFC-Tag-ID
+      description: >
+        NFC tag_id that is allowed to open the door. Leave empty to allow any
+        scanned tag from allowed users.
+        | Erlaubte NFC-tag_id zum Öffnen der Tür. Leer lassen, um jeden
+        gescannten Tag von erlaubten Benutzern zuzulassen.
+      default: ""
+      selector:
+        text:
+
     language:
       name: Language / Sprache
       description: >
@@ -130,6 +152,8 @@ variables:
   night_mode_enabled: !input night_mode_enabled
   night_mode_start: !input night_mode_start
   night_mode_end: !input night_mode_end
+  notification_action_id: !input notification_action_id
+  nfc_tag_id: !input nfc_tag_id
   language: !input language
 
 trigger:
@@ -153,7 +177,7 @@ trigger:
   - platform: event
     event_type: mobile_app_notification_action
     event_data:
-      action: OPEN_DOOR_NOW
+      action: !input notification_action_id
     id: open_door_action
   - platform: event
     event_type: tag_scanned
@@ -165,6 +189,7 @@ action:
   - variables:
       triggered_person: "{{ trigger.entity_id if trigger.entity_id is defined else '' }}"
       trigger_user_id: "{{ trigger.event.context.user_id if trigger.event is defined and trigger.event.context is defined else '' }}"
+      trigger_tag_id: "{{ trigger.event.data.tag_id if trigger.event is defined and trigger.event.data is defined else '' }}"
       is_allowed_user: >
         {% set ns = namespace(allowed=false) %}
         {% for p in people %}
@@ -173,6 +198,7 @@ action:
           {% endif %}
         {% endfor %}
         {{ ns.allowed }}
+      is_matching_nfc_tag: "{{ nfc_tag_id == '' or trigger_tag_id == nfc_tag_id }}"
       # True when nobody from the tracked list is home.
       # Computed directly with a namespace to avoid the string-length trap:
       # rendering a Jinja2 list with {{ ns.result }} produces a string like
@@ -263,7 +289,7 @@ action:
                 persistent: true
                 tag: door_arrival_notification
                 actions:
-                  - action: OPEN_DOOR_NOW
+                  - action: "{{ notification_action_id }}"
                     title: "{{ notif_action_title }}"
 
       # ── Someone left home ────────────────────────────────────────────────
@@ -339,7 +365,7 @@ action:
       # ── Allowed NFC tag scanned ─────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'nfc_tag_scanned' and (is_allowed_user | bool) }}"
+            value_template: "{{ trigger.id == 'nfc_tag_scanned' and (is_allowed_user | bool) and (is_matching_nfc_tag | bool) }}"
         sequence:
           - action: lock.open
             target:

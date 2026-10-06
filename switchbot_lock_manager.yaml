@@ -155,12 +155,24 @@ trigger:
     event_data:
       action: OPEN_DOOR_NOW
     id: open_door_action
+  - platform: event
+    event_type: tag_scanned
+    id: nfc_tag_scanned
 
 condition: []
 
 action:
   - variables:
       triggered_person: "{{ trigger.entity_id if trigger.entity_id is defined else '' }}"
+      trigger_user_id: "{{ trigger.event.context.user_id if trigger.event is defined and trigger.event.context is defined else '' }}"
+      is_allowed_user: >
+        {% set ns = namespace(allowed=false) %}
+        {% for p in people %}
+          {% if state_attr(p, 'user_id') == trigger_user_id %}
+            {% set ns.allowed = true %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.allowed }}
       # True when nobody from the tracked list is home.
       # Computed directly with a namespace to avoid the string-length trap:
       # rendering a Jinja2 list with {{ ns.result }} produces a string like
@@ -318,7 +330,16 @@ action:
       # a Home Assistant restart (no wait_for_trigger state to lose).
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'open_door_action' }}"
+            value_template: "{{ trigger.id == 'open_door_action' and (is_allowed_user | bool) }}"
+        sequence:
+          - action: lock.open
+            target:
+              entity_id: "{{ lock_entity }}"
+
+      # ── Allowed NFC tag scanned ─────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'nfc_tag_scanned' and (is_allowed_user | bool) }}"
         sequence:
           - action: lock.open
             target:

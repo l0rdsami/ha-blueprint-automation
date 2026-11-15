@@ -10,7 +10,9 @@ blueprint:
     remains home and is cleared automatically when they leave. An optional night
     mode prevents automatic unlocking during quiet hours so that arrivals must be
     manually approved by someone inside; it can also lock and unlock the door
-    automatically at its start and end times.
+    automatically at its start and end times. Optionally, everyone is sent an
+    actionable "Lock" notification when the door stays unlocked during the
+    night window; it is removed from all phones once the door is locked.
 
     The "Open Door" button survives Home Assistant restarts because it is
     handled by a dedicated event trigger, not a timed wait inside a run.
@@ -134,7 +136,7 @@ blueprint:
       selector:
         text:
 
-    nfc_tag_id:      
+    nfc_tag_id:
       name: NFC Tag ID / NFC-Tag-ID
       description: >
         NFC tag_id that is allowed to open the door. Leave empty to allow any
@@ -146,6 +148,57 @@ blueprint:
         text:
           multiline: false
 
+    unlocked_night_notify:
+      name: Notify when unlocked at night / Benachrichtigen, wenn nachts nicht abgeschlossen
+      description: >
+        Send an actionable notification to all tracked people when the door is
+        not locked during the night mode window (same start/end times as night
+        mode) for the delay below. The notification has a "Lock" button and is
+        removed from all phones as soon as the door is locked. If nobody is home,
+        the door is locked automatically instead.
+        | Sendet allen überwachten Personen eine interaktive Benachrichtigung,
+        wenn die Tür im Nachtmodus-Zeitraum (gleiche Zeiten wie der Nachtmodus)
+        länger als die unten eingestellte Zeit nicht abgeschlossen ist. Mit
+        Button „Abschließen“; wird auf allen Handys gelöscht, sobald die Tür
+        abgeschlossen ist. Ist niemand zu Hause, wird stattdessen automatisch
+        abgeschlossen.
+      default: false
+      selector:
+        boolean:
+
+    unlocked_night_delay:
+      name: Unlocked-at-night delay / Wartezeit nachts nicht abgeschlossen
+      description: >
+        Minutes the door must be unlocked during the night window before the
+        notification is sent.
+        | Minuten, die die Tür im Nachtzeitraum unverriegelt sein muss, bevor
+        benachrichtigt wird.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          unit_of_measurement: min
+          mode: slider
+
+    lock_action_id:
+      name: Lock Action ID / Aktions-ID Abschließen
+      description: >
+        Action identifier of the "Lock" button in the unlocked-at-night
+        notification.
+        | Aktionskennung des Buttons „Abschließen“ in der Nacht-Benachrichtigung.
+      default: "LOCK_DOOR_NOW"
+      selector:
+        text:
+
+# Available in trigger templates (limited templates: inputs only).
+trigger_variables:
+  tv_lock_entity: !input lock_entity
+  tv_night_start: !input night_mode_start
+  tv_night_end: !input night_mode_end
+  tv_unlocked_night_notify: !input unlocked_night_notify
+
 variables:
   lock_entity: !input lock_entity
   people: !input people
@@ -156,6 +209,8 @@ variables:
   notification_action_id: !input notification_action_id
   nfc_tag_id: !input nfc_tag_id
   language: !input language
+  unlocked_night_delay: !input unlocked_night_delay
+  lock_action_id: !input lock_action_id
 
 trigger:
   # Split into two precise triggers so that intermediate GPS state changes
@@ -187,6 +242,35 @@ trigger:
     event_data:
       tag_id: !input nfc_tag_id
     id: nfc_tag_scanned
+  # Door not locked inside the night window for the configured delay.
+  # The template re-renders every minute (now()), so this also fires when the
+  # door was already unlocked before the window started (e.g. the automatic
+  # lock at night mode start failed).
+  - platform: template
+    value_template: >
+      {% if not tv_unlocked_night_notify %}
+        {{ false }}
+      {% else %}
+        {% set t = now().strftime('%H:%M:%S') %}
+        {% if tv_night_start <= tv_night_end %}
+          {% set night = tv_night_start <= t < tv_night_end %}
+        {% else %}
+          {% set night = t >= tv_night_start or t < tv_night_end %}
+        {% endif %}
+        {{ night and states(tv_lock_entity) in ['unlocked', 'open', 'jammed'] }}
+      {% endif %}
+    for:
+      minutes: !input unlocked_night_delay
+    id: unlocked_at_night
+  - platform: event
+    event_type: mobile_app_notification_action
+    event_data:
+      action: !input lock_action_id
+    id: lock_door_action
+  - platform: state
+    entity_id: !input lock_entity
+    to: "locked"
+    id: door_locked
 
 condition: []
 
@@ -260,6 +344,25 @@ action:
           Tür öffnen
         {% else %}
           Open Door
+        {% endif %}
+      lock_name: "{{ state_attr(lock_entity, 'friendly_name') | default(lock_entity, true) }}"
+      night_title: >
+        {% if language == 'de' %}
+          Tür nicht abgeschlossen
+        {% else %}
+          Door not locked
+        {% endif %}
+      night_message: >
+        {% if language == 'de' %}
+          {{ lock_name }} ist seit {{ unlocked_night_delay | int }} Minuten nicht abgeschlossen.
+        {% else %}
+          {{ lock_name }} has not been locked for {{ unlocked_night_delay | int }} minutes.
+        {% endif %}
+      night_action_title: >
+        {% if language == 'de' %}
+          Abschließen
+        {% else %}
+          Lock
         {% endif %}
 
   - choose:
@@ -373,6 +476,55 @@ action:
           - action: lock.open
             target:
               entity_id: "{{ lock_entity }}"
+
+      # ── Door not locked at night ─────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'unlocked_at_night' }}"
+        sequence:
+          - if:
+              # Nobody home: just lock. This also covers a lock delay that was
+              # cancelled because this trigger restarted the automation.
+              - condition: template
+                value_template: "{{ all_away | bool }}"
+            then:
+              - action: lock.lock
+                target:
+                  entity_id: "{{ lock_entity }}"
+            else:
+              - action: script.notify_people
+                data:
+                  persons: "{{ people }}"
+                  title: "{{ night_title }}"
+                  message: "{{ night_message }}"
+                  data:
+                    tag: door_unlocked_night
+                    sticky: true
+                    persistent: true
+                    actions:
+                      - action: "{{ lock_action_id }}"
+                        title: "{{ night_action_title }}"
+
+      # ── "Lock" button tapped in the night notification ───────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'lock_door_action' and (is_allowed_user | bool) }}"
+        sequence:
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_entity }}"
+
+      # ── Door locked: remove the night notification from every phone ─────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'door_locked' }}"
+        sequence:
+          - action: script.notify_people
+            data:
+              persons: "{{ people }}"
+              message: "clear_notification"
+              data:
+                tag: door_unlocked_night
 
 mode: restart
 max_exceeded: silent

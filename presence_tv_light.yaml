@@ -346,6 +346,7 @@ action:
               value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
           then:
             - action: media_player.media_pause
+              continue_on_error: true
               target:
                 entity_id: !input tv_entity
 
@@ -406,6 +407,7 @@ action:
           value_template: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
       sequence:
         - action: media_player.media_pause
+          continue_on_error: true
           target:
             entity_id: !input tv_entity
         - action: scene.turn_on

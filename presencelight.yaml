@@ -126,6 +126,28 @@ blueprint:
           unit_of_measurement: seconds
           mode: slider
           step: 1.0
+    pause_entities:
+      name: Pause helpers (optional)
+      description: >
+        Suspend presence actions while any helper is on or unavailable. Changes
+        cancel a pending switch-off; when every helper is off, occupancy is
+        evaluated again. Useful for guest mode or another lighting owner.
+      default: []
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+            - domain: binary_sensor
+          multiple: true
+    recheck_entities:
+      name: Additional state triggers (optional)
+      description: >
+        Re-evaluate occupancy and activation conditions when these entities
+        change, for example a PC becoming online while the room is occupied.
+      default: []
+      selector:
+        entity:
+          multiple: true
     additional_conditions:
       name: Additional conditions
       description: |
@@ -143,12 +165,21 @@ variables:
   on_scene: !input on_scene
   presence_entities: !input presence_entities
   light_target: !input light_target
+  pause_entities: !input pause_entities
 
 trigger:
   - platform: state
     entity_id: !input presence_entities
     to: null
     id: presence_changed
+  - platform: state
+    entity_id: !input pause_entities
+    to: null
+    id: pause_changed
+  - platform: state
+    entity_id: !input recheck_entities
+    to: null
+    id: recheck
   - platform: homeassistant
     event: start
     id: startup
@@ -156,12 +187,20 @@ trigger:
 condition: []
 
 action:
+  - alias: Pause helpers must all be explicitly off
+    condition: template
+    value_template: >-
+      {% set ns = namespace(allowed=true) %}
+      {% for entity in pause_entities %}
+        {% if not is_state(entity, 'off') %}{% set ns.allowed = false %}{% endif %}
+      {% endfor %}
+      {{ ns.allowed }}
   - choose:
       - alias: Activate only on occupancy or startup, not on every sensor clearing
         conditions:
           - condition: template
             value_template: >-
-              {{ (trigger.id == 'startup' or
+              {{ (trigger.id in ['startup', 'pause_changed', 'recheck'] or
                   (trigger.to_state is not none and trigger.to_state.state == 'on'))
                  and expand(presence_entities) | selectattr('state', 'eq', 'on')
                      | list | length > 0 }}
@@ -214,7 +253,7 @@ action:
             condition: template
             value_template: >-
               {% set ns = namespace(clear=presence_entities | length > 0) %}
-              {% for entity in presence_entities %}
+              {% for entity in presence_entities + pause_entities %}
                 {% if not is_state(entity, 'off') %}{% set ns.clear = false %}{% endif %}
               {% endfor %}
               {{ ns.clear }}

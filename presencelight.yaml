@@ -145,84 +145,99 @@ variables:
   light_target: !input light_target
 
 trigger:
-  platform: state
-  entity_id: !input presence_entities
-  to: 'on'
+  - platform: state
+    entity_id: !input presence_entities
+    to: null
+    id: presence_changed
+  - platform: homeassistant
+    event: start
+    id: startup
 
-condition:
-  - alias: Lux check (skipped if no sensor configured)
-    condition: template
-    value_template: >
-      {{ light_sensor == '' or
-         (states(light_sensor) not in ('unavailable', 'unknown', '')
-          and states(light_sensor) | float(0) < light_threshold) }}
-  - alias: Antizone check (blocked if any antizone is active or recently cleared)
-    condition: template
-    value_template: >
-      {% set ns = namespace(blocked=false) %}
-      {% for entity in antizone_entities %}
-        {% if is_state(entity, 'on') %}
-          {% set ns.blocked = true %}
-        {% elif antizone_clear_timeout > 0 and
-                (now() - states[entity].last_changed).total_seconds() < antizone_clear_timeout %}
-          {% set ns.blocked = true %}
-        {% endif %}
-      {% endfor %}
-      {{ not ns.blocked }}
-  - condition: !input additional_conditions
+condition: []
 
 action:
-  - alias: Turn on the light or activate scene
-    choose:
-      - conditions:
+  - choose:
+      - alias: Activate only on occupancy or startup, not on every sensor clearing
+        conditions:
           - condition: template
-            value_template: "{{ on_scene != '' }}"
+            value_template: >-
+              {{ (trigger.id == 'startup' or
+                  (trigger.to_state is not none and trigger.to_state.state == 'on'))
+                 and expand(presence_entities) | selectattr('state', 'eq', 'on')
+                     | list | length > 0 }}
         sequence:
-          - action: scene.turn_on
-            target:
-              entity_id: "{{ on_scene }}"
-    default:
-      - action: light.turn_on
-        data:
-          transition: !input off_transition
-        target: !input light_target
-  - alias: Wait until light transitioned
-    delay: !input off_transition
-  - alias: Wait until there is no motion from any sensor
-    wait_for_trigger:
-      - platform: template
-        value_template: >
-          {% set ns = namespace(all_off=true) %}
-          {% for entity in presence_entities %}
-            {% if is_state(entity, 'on') %}{% set ns.all_off = false %}{% endif %}
-          {% endfor %}
-          {{ ns.all_off }}
-        for:
-          seconds: !input no_motion_wait
-  - alias: Wait the no_motion_wait period
-    delay:
-      seconds: !input no_motion_wait
-  - alias: Turn off the light
-    choose:
-      - conditions:
+          - alias: Lux check (skipped if no sensor configured)
+            condition: template
+            value_template: >
+              {{ light_sensor == '' or
+                 (states(light_sensor) not in ('unavailable', 'unknown', '')
+                  and states(light_sensor) | float(0) < light_threshold) }}
+          - alias: Antizone check (blocked if any antizone is active or recently cleared)
+            condition: template
+            value_template: >
+              {% set ns = namespace(blocked=false) %}
+              {% for entity in antizone_entities %}
+                {% if states(entity) not in ['off'] %}
+                  {% set ns.blocked = true %}
+                {% elif antizone_clear_timeout > 0 and
+                        (now() - states[entity].last_changed).total_seconds() < antizone_clear_timeout %}
+                  {% set ns.blocked = true %}
+                {% endif %}
+              {% endfor %}
+              {{ not ns.blocked }}
+          - condition: !input additional_conditions
+          - alias: Turn on the light or activate scene
+            choose:
+              - conditions: "{{ on_scene != '' }}"
+                sequence:
+                  - action: scene.turn_on
+                    target:
+                      entity_id: "{{ on_scene }}"
+            default:
+              - action: light.turn_on
+                target: !input light_target
+                data:
+                  transition: !input off_transition
+      - alias: Start one vacancy grace period only when every sensor is explicitly clear
+        conditions:
           - condition: template
-            value_template: "{{ on_scene != '' and light_target | length == 0 }}"
+            value_template: >-
+              {% set ns = namespace(clear=presence_entities | length > 0) %}
+              {% for entity in presence_entities %}
+                {% if not is_state(entity, 'off') %}{% set ns.clear = false %}{% endif %}
+              {% endfor %}
+              {{ ns.clear }}
         sequence:
-          - action: light.turn_off
-            target:
-              entity_id: >
-                {{ state_attr(on_scene, 'entity_id')
-                   | select('match', '^light\.')
-                   | list }}
-            data:
-              transition: !input off_transition
-    default:
-      - action: light.turn_off
-        target: !input light_target
-        data:
-          transition: !input off_transition
-  - alias: Wait until light transitioned
-    delay: !input off_transition
+          - delay:
+              seconds: !input no_motion_wait
+          - alias: Recheck occupancy and availability immediately before off
+            condition: template
+            value_template: >-
+              {% set ns = namespace(clear=presence_entities | length > 0) %}
+              {% for entity in presence_entities %}
+                {% if not is_state(entity, 'off') %}{% set ns.clear = false %}{% endif %}
+              {% endfor %}
+              {{ ns.clear }}
+          - choose:
+              - conditions: "{{ on_scene != '' and light_target | length == 0 }}"
+                sequence:
+                  - variables:
+                      scene_lights: >-
+                        {{ (state_attr(on_scene, 'entity_id') or [])
+                           | select('match', '^light\.') | list }}
+                  - condition: template
+                    value_template: "{{ scene_lights | length > 0 }}"
+                  - action: light.turn_off
+                    target:
+                      entity_id: "{{ scene_lights }}"
+                    data:
+                      transition: !input off_transition
+            default:
+              - action: light.turn_off
+                target: !input light_target
+                data:
+                  transition: !input off_transition
 
-mode: single
+# No top-level activation conditions: every sensor change must cancel a pending off.
+mode: restart
 max_exceeded: silent

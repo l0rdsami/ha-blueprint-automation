@@ -1,6 +1,10 @@
 blueprint:
   name: Light Link
-  description: Link a light and a switch entity using the savedState Script
+  description: >
+    Synchronize a light and wall switch with explicit on/off commands. Unknown
+    and unavailable states never become commands. Queued edges are rechecked
+    against both endpoints before execution; the latest confirmed state wins
+    conflicting changes (the wall switch wins an exact timestamp tie).
   domain: automation
   source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/lightlink.yaml
   input:
@@ -47,30 +51,54 @@ triggers:
     to: null
     id: switch
 
+# These checks avoid queuing work for uncertain states or an already matched pair.
+# The same checks are repeated inside the queue: conditions can change while
+# another service call is running.
 conditions:
-  - alias: "States need to be different"
-    condition: template
-    value_template: "{{ states(light_entity) != states(switch_entity) }}"
+  - condition: template
+    value_template: >
+      {{ trigger.to_state is not none
+         and trigger.to_state.state in ['on', 'off']
+         and states(light_entity) in ['on', 'off']
+         and states(switch_entity) in ['on', 'off']
+         and states(light_entity) != states(switch_entity) }}
   - condition: !input conditions
 
 actions:
-  - alias: "Distinguish Target and Trigger"
-    choose:
-    - conditions:
-        - condition: trigger
-          id: light
-      sequence:
-        - alias: "Toggle switch"
-          service: switch.toggle
-          target:
-            entity_id: !input switch_entity
-    - conditions:
-        - condition: trigger
-          id: switch
-      sequence:
-        - action: light.toggle
-          metadata: {}
-          data:
-            transition: !input delay
-          target:
-            entity_id: !input light_entity
+  - variables:
+      source_entity: "{{ light_entity if trigger.id == 'light' else switch_entity }}"
+      target_entity: "{{ switch_entity if trigger.id == 'light' else light_entity }}"
+      intended_state: "{{ trigger.to_state.state }}"
+
+  - alias: "Discard stale edges and preserve a newer opposite-side intent"
+    condition: template
+    value_template: >
+      {{ intended_state in ['on', 'off']
+         and is_state(source_entity, intended_state)
+         and states[source_entity].last_changed == trigger.to_state.last_changed
+         and states(target_entity) in ['on', 'off']
+         and not is_state(target_entity, intended_state)
+         and (states[target_entity].last_changed < trigger.to_state.last_changed
+              or (trigger.id == 'switch'
+                  and states[target_entity].last_changed == trigger.to_state.last_changed)) }}
+  - condition: !input conditions
+
+  # Explicit commands cannot invert a counterpart that has already converged.
+  # Keep the wall switch as a first-class source of intent in both directions.
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: light
+        sequence:
+          - action: "{{ 'switch.turn_' ~ intended_state }}"
+            target:
+              entity_id: !input switch_entity
+      - conditions:
+          - condition: trigger
+            id: switch
+        sequence:
+          - action: "{{ 'light.turn_' ~ intended_state }}"
+            data:
+              transition: !input delay
+            target:
+              entity_id: !input light_entity

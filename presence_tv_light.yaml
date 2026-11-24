@@ -310,7 +310,6 @@ action:
       - if: >
           {{ vacancy_age | float >= 2
              and presence_sensors | select('is_state', 'off') | list | count == presence_sensors | count
-             and linked_lights | map('states') | select('eq', 'on') | list | count > 0
              and tv_entity != '' and is_state(tv_entity, 'playing') }}
         then:
           - action: media_player.media_pause

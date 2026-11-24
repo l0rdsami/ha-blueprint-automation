@@ -327,12 +327,36 @@ action:
         value_template: >
           {{ presence_sensors | count > 0
              and presence_sensors | select('is_state', 'off') | list | count
-                 == presence_sensors | count and linked_lights | count > 0 }}
-      - action: light.turn_off
-        target:
-          entity_id: "{{ linked_lights }}"
-        data:
-          transition: !input off_transition
+                 == presence_sensors | count }}
+      - if: "{{ linked_lights | count > 0 }}"
+        then:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ linked_lights }}"
+            data:
+              transition: !input off_transition
+      # Preserve short/zero light deadlines without losing the independent TV
+      # debounce. Re-entry or uncertain presence cancels this restartable wait.
+      - if: "{{ vacancy_age | float < 2 and tv_entity != '' }}"
+        then:
+          - delay:
+              seconds: >
+                {% set ns = namespace(ages=[]) %}
+                {% for e in presence_sensors %}
+                  {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
+                {% endfor %}
+                {{ [0, 2 - (ns.ages | min)] | max }}
+          - condition: template
+            value_template: >
+              {{ presence_sensors | count > 0
+                 and presence_sensors | select('is_state', 'off') | list | count
+                     == presence_sensors | count }}
+          - if: "{{ is_state(tv_entity, 'playing') }}"
+            then:
+              - action: media_player.media_pause
+                continue_on_error: true
+                target:
+                  entity_id: "{{ tv_entity }}"
       - stop: "Known vacancy handled; never fall through to occupied scenes."
 
   - condition: template

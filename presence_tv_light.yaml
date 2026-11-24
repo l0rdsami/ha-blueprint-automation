@@ -247,6 +247,13 @@ condition:
       {{ trigger.id != 'couch_left'
          or (tv_entity != '' and is_state(tv_entity, 'playing')
              and couch_sensor != '' and is_state(couch_sensor, 'off')) }}
+  # Template triggers retain the state edge that started their native for timer.
+  # Reject reconnects before entering the restart-mode script: an unavailable ->
+  # paused/idle recovery must not cancel an occupied ramp or restore brightness.
+  - condition: template
+    value_template: >
+      {{ trigger.id != 'tv_stopped'
+         or (trigger.from_state is not none and trigger.from_state.state == 'playing') }}
 
 action:
   - variables:

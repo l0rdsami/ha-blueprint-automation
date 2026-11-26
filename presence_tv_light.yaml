@@ -1,194 +1,141 @@
 blueprint:
-  name: "Presence & TV Room Lighting"
+  name: Presence & TV Room Lighting
   description: >
-    Event-driven presence and TV lighting with no helper entities. New relevant
-    events cancel the previous run and reconcile current state. Delays use
-    sensor last_changed times, so TV/zone events do not extend an existing dwell
-    or vacancy deadline. Home Assistant startup and presence recovery also reconcile state.
+    Event-driven presence and TV lighting with no helper entities.
 
-    Motion starts the dim scene. After sustained presence, select the TV scene
-    if playback is already active, otherwise the day/night bright scene. TV
-    playback changes retain their immediate/5-second-debounced behavior while
-    lights are on. Leaving the couch pauses playback; an empty room always has
-    priority over bright/TV scenes. Media-player errors do not stop lighting.
 
-    Vacancy requires every configured presence entity to report exactly off:
-    unknown, unavailable and missing entities never count as an empty room.
-    Known vacancy dims/pauses after 2 seconds, then turns off at ramp-up dwell
-    plus off-wait. These timers are recalculated from current state, not persisted
-    across HA restarts. Optional TV/couch inputs may be left empty.
+    Scenes are only applied on transitions, so manual adjustments stay until the
+    next real change: lights off → dim on arrival, dim → bright (or TV scene) after
+    sustained presence, TV start/stop, leaving the couch during playback, vacancy
+    (dim, pause TV, then off) and the day/night switch (slow transition, only while
+    in bright mode).
+
+
+    A short dropout (room empty for at least 2 s but less than the ramp-up dwell)
+    restores the previous scene immediately when presence returns. A longer one
+    stays dim until presence has been sustained for the dwell again.
+
+
+    Vacancy requires every presence entity to report exactly 'off': unknown,
+    unavailable and missing entities never count as an empty room. Buffering does
+    not count as the TV stopping. Media-player errors do not stop lighting.
+    Optional TV/couch inputs may be left empty.
   homeassistant:
-    min_version: 2023.8.0
+    min_version: 2024.8.0
   domain: automation
   source_url: https://github.com/l0rdsami/ha-blueprint-automation/blob/main/presence_tv_light.yaml
-
   input:
     presence_sensors:
       name: Presence / Motion Sensors
-      description: >
-        One or more presence or motion binary sensors (or groups). Any sensor
-        switching to 'on' starts or restarts the lighting cycle.
+      description: One or more presence or motion binary sensors (or groups).
       selector:
         entity:
           filter:
             - domain: binary_sensor
-              device_class:
-                - occupancy
-                - motion
+              device_class: [occupancy, motion]
             - domain: group
           multiple: true
-
     couch_sensor:
       name: Couch Presence Sensor (optional)
       description: >
-        Presence sensor for the couch / sofa zone. Only used while TV mode is
-        already active. Leaving the couch exits TV mode and pauses the TV.
-        Leave empty to skip the couch check entirely (TV mode exits only when
-        the TV stops or all presence clears).
-      default: ""
+        Couch / sofa zone. Only used while the TV is playing: leaving the couch
+        pauses the TV and switches to the bright scene.
+      default: ''
       selector:
         entity:
           filter:
             - domain: binary_sensor
-              device_class:
-                - occupancy
-                - motion
-          multiple: false
-
+              device_class: [occupancy, motion]
     tv_entity:
       name: TV / Media Player (optional)
-      description: >
-        Media player entity for the room. TV mode is entered when the player
-        reaches 'playing' state. Leave empty to disable TV mode entirely.
-      default: ""
+      description: Media player for the room. Leave empty to disable TV mode.
+      default: ''
       selector:
         entity:
           filter:
             - domain: media_player
-          multiple: false
-
     dim_scene:
       name: Dim Scene
       description: >
-        Scene for initial / dim lighting. Activated immediately on motion and
-        again during wind-down. All light entities listed in this scene are
-        used to determine which lights to turn off at the end of the cycle.
+        Scene on arrival and during vacancy. Its light entities are the lights
+        this automation manages (checked for on/off and turned off at the end).
       selector:
         entity:
           filter:
             - domain: scene
-          multiple: false
-
     bright_day_scene:
       name: Bright Day Scene
-      description: >
-        Scene for full-brightness lighting during daytime hours. Activated
-        once presence has been sustained for the ramp-up dwell time and the
-        current time falls within the day window.
       selector:
         entity:
           filter:
             - domain: scene
-          multiple: false
-
     bright_night_scene:
       name: Bright Night Scene
-      description: >
-        Scene for full-brightness lighting during nighttime hours. Activated
-        once presence has been sustained for the ramp-up dwell time and the
-        current time is outside the day window.
       selector:
         entity:
           filter:
             - domain: scene
-          multiple: false
-
     tv_scene:
       name: TV Scene (optional)
-      description: >
-        Scene activated when TV mode is entered. Leave empty to keep the
-        current bright scene during TV playback.
-      default: ""
+      description: Scene while the TV is playing. Leave empty to keep the bright scene.
+      default: ''
       selector:
         entity:
           filter:
             - domain: scene
-          multiple: false
-
     ramp_up_wait:
       name: Ramp-up Dwell Time (seconds)
       description: >
-        How long presence must be continuously detected before lights transition
-        from dim to bright. The same duration is reused as the dim phase during
-        wind-down before the off-wait begins.
+        How long presence must be sustained before dim → bright. Also the dim phase
+        during vacancy before the off-wait starts, and the limit for a "short
+        dropout" that restores the scene immediately.
       default: 60
       selector:
-        number:
-          min: 0
-          max: 3600
-          unit_of_measurement: s
-          mode: slider
-          step: 1
-
+        number: {min: 0, max: 3600, step: 1, unit_of_measurement: s, mode: slider}
     ramp_up_transition:
       name: Ramp-up Transition Time (seconds)
-      description: >
-        Transition duration when switching from dim to bright (and when
-        returning from TV mode to bright).
+      description: Transition into the bright / TV scene.
       default: 5
       selector:
-        number:
-          min: 0
-          max: 60
-          unit_of_measurement: s
-          mode: slider
-          step: 1
-
+        number: {min: 0, max: 60, step: 1, unit_of_measurement: s, mode: slider}
+    vacancy_dim_transition:
+      name: Vacancy Dim Transition Time (seconds)
+      description: Transition into the dim scene when the room becomes empty.
+      default: 5
+      selector:
+        number: {min: 0, max: 60, step: 1, unit_of_measurement: s, mode: slider}
     off_wait:
       name: Off Wait Time (seconds)
-      description: >
-        Additional time to stay in dim mode after the wind-down dim phase
-        elapses before turning the lights off.
+      description: Extra time in dim after the vacancy dim phase before turning off.
       default: 60
       selector:
-        number:
-          min: 0
-          max: 3600
-          unit_of_measurement: s
-          mode: slider
-          step: 1
-
+        number: {min: 0, max: 3600, step: 1, unit_of_measurement: s, mode: slider}
     off_transition:
       name: Turn-off Transition Time (seconds)
-      description: >
-        Transition duration when turning the lights off.
       default: 5
       selector:
-        number:
-          min: 0
-          max: 60
-          unit_of_measurement: s
-          mode: slider
-          step: 1
-
+        number: {min: 0, max: 60, step: 1, unit_of_measurement: s, mode: slider}
     day_start:
       name: Day Mode Start Time
       description: >
-        Start of the daytime window. The bright day scene is used between this
-        time and the day mode end time. Set start later than end for an
-        overnight day window (e.g. 20:00 → 06:00).
-      default: "07:00:00"
+        Start of the day window (bright day scene). Start later than end gives an
+        overnight window.
+      default: '07:00:00'
       selector:
         time: {}
-
     day_end:
       name: Day Mode End Time
-      description: >
-        End of the daytime window. The bright night scene is used outside
-        this window.
-      default: "22:00:00"
+      default: '22:00:00'
       selector:
         time: {}
+    day_night_transition:
+      name: Day/Night Switch Transition Time (seconds)
+      description: >
+        Transition used when the bright scene changes at day start / day end while
+        the lights are already bright.
+      default: 900
+      selector:
+        number: {min: 0, max: 3600, step: 10, unit_of_measurement: s, mode: slider}
 
 trigger_variables:
   _tv_entity: !input tv_entity
@@ -208,22 +155,26 @@ variables:
   off_wait: !input off_wait
 
 trigger:
-  # Include explicit off and availability recovery, without attribute-only noise.
   - platform: state
     entity_id: !input presence_sensors
-    to: null
+    to: ~
     id: presence
+  - platform: state
+    entity_id: !input presence_sensors
+    to: 'on'
+    for:
+      seconds: !input ramp_up_wait
+    id: ramp_up_done
   - platform: homeassistant
     event: start
     id: startup
-  # Templates keep genuinely optional entity selectors valid when left empty.
   - platform: template
     value_template: "{{ _tv_entity != '' and is_state(_tv_entity, 'playing') }}"
     id: tv_started
   - platform: template
     value_template: >
-      {{ _tv_entity != ''
-         and states(_tv_entity) not in ['playing', 'unknown', 'unavailable'] }}
+      {{ _tv_entity != '' and states(_tv_entity)
+         not in ['playing', 'buffering', 'unknown', 'unavailable'] }}
     for:
       seconds: 5
     id: tv_stopped
@@ -232,102 +183,77 @@ trigger:
     for:
       seconds: 2
     id: couch_left
+  - platform: time
+    at: !input day_start
+    id: day_switch
+  - platform: time
+    at: !input day_end
+    id: day_switch
 
 condition:
-  # An irrelevant media event must not cancel a dim-scene call that has not yet
-  # reported a light on. The occupied run will inspect current playback later.
+  # Anything but arrival/startup only matters while the lights are on.
   - condition: template
     value_template: >
       {{ trigger.id in ['presence', 'startup']
          or (state_attr(dim_scene, 'entity_id') | default([], true)
-             | select('match', '^light\.') | map('states')
-             | select('eq', 'on') | list | count > 0) }}
+             | select('match', '^light\.') | select('is_state', 'on') | list | count > 0) }}
   - condition: template
     value_template: >
       {{ trigger.id != 'couch_left'
          or (tv_entity != '' and is_state(tv_entity, 'playing')
              and couch_sensor != '' and is_state(couch_sensor, 'off')) }}
-  # Template triggers retain the state edge that started their native for timer.
-  # Reject reconnects before entering the restart-mode script: an unavailable ->
-  # paused/idle recovery must not cancel an occupied ramp or restore brightness.
   - condition: template
     value_template: >
       {{ trigger.id != 'tv_stopped'
-         or (trigger.from_state is not none and trigger.from_state.state == 'playing') }}
+         or (trigger.from_state is not none
+             and trigger.from_state.state in ['playing', 'buffering']) }}
 
 action:
   - variables:
       linked_lights: >
         {{ state_attr(dim_scene, 'entity_id') | default([], true)
            | select('match', '^light\.') | list }}
-      any_presence_on: >
-        {{ presence_sensors | select('is_state', 'on') | list | count > 0 }}
+      lights_on: "{{ linked_lights | select('is_state', 'on') | list | count > 0 }}"
+      any_presence_on: "{{ presence_sensors | select('is_state', 'on') | list | count > 0 }}"
       all_presence_off: >
-        {{ presence_sensors | count > 0
-           and presence_sensors | select('is_state', 'off') | list | count
-               == presence_sensors | count }}
-      lights_on: >
-        {{ linked_lights | map('states') | select('eq', 'on') | list | count > 0 }}
+        {{ presence_sensors | count > 0 and
+           presence_sensors | select('is_state', 'off') | list | count == presence_sensors | count }}
 
   - if: "{{ not any_presence_on and not all_presence_off }}"
     then:
-      - stop: "Presence is uncertain; cancel pending vacancy without issuing commands."
+      - stop: Presence is uncertain; cancel pending vacancy without issuing commands.
 
-  # Empty-room handling has priority, including simultaneous couch/TV events.
+  # ── VACANCY ──────────────────────────────────────────────────────────────────
+  # Any presence change restarts this run, so the room stays empty while it waits.
   - if: "{{ all_presence_off }}"
     then:
       - variables:
-          vacancy_age: >
-            {% set ns = namespace(ages=[]) %}
+          vacant_since: >
+            {% set ns = namespace(t=0) %}
             {% for e in presence_sensors %}
-              {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
+              {% set ns.t = [ns.t, as_timestamp(states[e].last_changed)] | max %}
             {% endfor %}
-            {{ ns.ages | min }}
+            {{ ns.t }}
+          off_after: "{{ ramp_up_wait | float + off_wait | float }}"
       - delay:
-          seconds: "{{ [0, ([2, (ramp_up_wait | float + off_wait | float)] | min) - vacancy_age | float] | max }}"
-      - condition: template
-        value_template: >
-          {{ presence_sensors | count > 0
-             and presence_sensors | select('is_state', 'off') | list | count
-                 == presence_sensors | count }}
-      - variables:
-          vacancy_age: >
-            {% set ns = namespace(ages=[]) %}
-            {% for e in presence_sensors %}
-              {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
-            {% endfor %}
-            {{ ns.ages | min }}
-      # A short/zero off deadline must never be followed by a late dim command.
-      - if: >
-          {{ vacancy_age | float < ramp_up_wait | float + off_wait | float
-             and linked_lights | map('states') | select('eq', 'on') | list | count > 0 }}
+          seconds: "{{ [0, [2, off_after | float] | min - (as_timestamp(now()) - vacant_since | float)] | max }}"
+      - if: "{{ as_timestamp(now()) - vacant_since | float < off_after | float
+                and linked_lights | select('is_state', 'on') | list | count > 0 }}"
         then:
           - action: scene.turn_on
             target:
               entity_id: !input dim_scene
             data:
-              transition: !input ramp_up_transition
-      - if: >
-          {{ vacancy_age | float >= 2
-             and presence_sensors | select('is_state', 'off') | list | count == presence_sensors | count
-             and tv_entity != '' and is_state(tv_entity, 'playing') }}
+              transition: !input vacancy_dim_transition
+      - if: "{{ as_timestamp(now()) - vacant_since | float >= 2
+                and tv_entity != '' and is_state(tv_entity, 'playing') }}"
         then:
           - action: media_player.media_pause
             continue_on_error: true
             target:
               entity_id: "{{ tv_entity }}"
       - delay:
-          seconds: >
-            {% set ns = namespace(ages=[]) %}
-            {% for e in presence_sensors %}
-              {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
-            {% endfor %}
-            {{ [0, ramp_up_wait | float + off_wait | float - (ns.ages | min)] | max }}
-      - condition: template
-        value_template: >
-          {{ presence_sensors | count > 0
-             and presence_sensors | select('is_state', 'off') | list | count
-                 == presence_sensors | count }}
+          seconds: "{{ [0, off_after | float - (as_timestamp(now()) - vacant_since | float)] | max }}"
       - if: "{{ linked_lights | count > 0 }}"
         then:
           - action: light.turn_off
@@ -335,87 +261,141 @@ action:
               entity_id: "{{ linked_lights }}"
             data:
               transition: !input off_transition
-      # Preserve short/zero light deadlines without losing the independent TV
-      # debounce. Re-entry or uncertain presence cancels this restartable wait.
-      - if: "{{ vacancy_age | float < 2 and tv_entity != '' }}"
+      # Off deadline under 2 s: still give the TV its 2 s before pausing.
+      - if: "{{ tv_entity != '' and is_state(tv_entity, 'playing') }}"
         then:
           - delay:
-              seconds: >
-                {% set ns = namespace(ages=[]) %}
-                {% for e in presence_sensors %}
-                  {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
-                {% endfor %}
-                {{ [0, 2 - (ns.ages | min)] | max }}
-          - condition: template
-            value_template: >
-              {{ presence_sensors | count > 0
-                 and presence_sensors | select('is_state', 'off') | list | count
-                     == presence_sensors | count }}
-          - if: "{{ is_state(tv_entity, 'playing') }}"
-            then:
-              - action: media_player.media_pause
-                continue_on_error: true
-                target:
-                  entity_id: "{{ tv_entity }}"
-      - stop: "Known vacancy handled; never fall through to occupied scenes."
+              seconds: "{{ [0, 2 - (as_timestamp(now()) - vacant_since | float)] | max }}"
+          - action: media_player.media_pause
+            continue_on_error: true
+            target:
+              entity_id: "{{ tv_entity }}"
+      - stop: Vacancy handled.
 
-  - condition: template
-    value_template: "{{ presence_sensors | select('is_state', 'on') | list | count > 0 }}"
-  - if: "{{ not lights_on }}"
-    then:
-      - action: scene.turn_on
-        target:
-          entity_id: !input dim_scene
-
-  - if: >
-      {{ trigger.id == 'couch_left' and couch_sensor != ''
-         and is_state(couch_sensor, 'off') and tv_entity != ''
-         and is_state(tv_entity, 'playing') }}
-    then:
-      - action: media_player.media_pause
-        continue_on_error: true
-        target:
-          entity_id: "{{ tv_entity }}"
-
+  # ── OCCUPIED ─────────────────────────────────────────────────────────────────
   - variables:
-      immediate_scene: >
-        {{ lights_on and
-           ((trigger.id == 'tv_started' and tv_entity != '' and is_state(tv_entity, 'playing'))
-            or (trigger.id == 'tv_stopped' and tv_entity != ''
-                and states(tv_entity) not in ['playing', 'unknown', 'unavailable'])
-            or (trigger.id == 'couch_left' and couch_sensor != '' and is_state(couch_sensor, 'off'))) }}
-  - if: "{{ not immediate_scene }}"
-    then:
-      - delay:
-          seconds: >
-            {% set ns = namespace(ages=[0]) %}
-            {% for e in presence_sensors if is_state(e, 'on') %}
-              {% set ns.ages = ns.ages + [as_timestamp(now()) - as_timestamp(states[e].last_changed)] %}
-            {% endfor %}
-            {{ [0, ramp_up_wait | float - (ns.ages | max)] | max }}
-
-  # Inspect live presence/playback again after every cancellable dwell/service call.
-  - condition: template
-    value_template: "{{ presence_sensors | select('is_state', 'on') | list | count > 0 }}"
-  - variables:
-      bright_scene: >
+      bright_scene: >-
         {%- set t = now().strftime('%H:%M:%S') -%}
         {%- if day_start <= day_end -%}
           {{- bright_day_scene if day_start <= t < day_end else bright_night_scene -}}
         {%- else -%}
           {{- bright_day_scene if t >= day_start or t < day_end else bright_night_scene -}}
         {%- endif -%}
-      desired_scene: >
-        {{ tv_scene if tv_scene != '' and tv_entity != '' and is_state(tv_entity, 'playing')
-           and not (trigger.id == 'couch_left' and couch_sensor != '' and is_state(couch_sensor, 'off'))
-           else bright_scene }}
-  - action: scene.turn_on
-    target:
-      entity_id: "{{ desired_scene }}"
-    data:
-      transition: !input ramp_up_transition
+      tv_mode: "{{ tv_scene != '' and tv_entity != '' and is_state(tv_entity, 'playing') }}"
+      desired_scene: "{{ tv_scene if tv_mode else bright_scene }}"
+      # Seconds since the longest-present sensor turned on.
+      presence_age: >
+        {% set ns = namespace(t=as_timestamp(now())) %}
+        {% for e in presence_sensors if is_state(e, 'on') %}
+          {% set ns.t = [ns.t, as_timestamp(states[e].last_changed)] | min %}
+        {% endfor %}
+        {{ as_timestamp(now()) - ns.t }}
+      # For presence / ramp_up_done: how long the room was empty before this
+      # sensor turned on (0 when another sensor was still on, or no clean off→on).
+      vacancy_len: >
+        {% if trigger.id in ['presence', 'ramp_up_done']
+              and trigger.from_state is not none and trigger.to_state is not none
+              and trigger.from_state.state == 'off' and trigger.to_state.state == 'on' %}
+          {% set start = as_timestamp(trigger.to_state.last_changed) %}
+          {% set ns = namespace(since=as_timestamp(trigger.from_state.last_changed), vacant=true) %}
+          {% for e in presence_sensors if e != trigger.entity_id and states[e] is not none %}
+            {% set lc = as_timestamp(states[e].last_changed) %}
+            {% if lc < start %}
+              {% if is_state(e, 'off') %}{% set ns.since = [ns.since, lc] | max %}
+              {% else %}{% set ns.vacant = false %}{% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ (start - ns.since) if ns.vacant else 0 }}
+        {% else %}0{% endif %}
 
-# No parallel bright/dim writers or queue of stale scene decisions. Relevant state
-# changes cancel a pending delay, and the new run recalculates its remaining time.
+  - choose:
+      # Arrival or presence change.
+      - conditions: "{{ trigger.id == 'presence' }}"
+        sequence:
+          - if: "{{ not lights_on }}"
+            then:
+              # Off → dim; ramp_up_done brightens after the dwell.
+              - action: scene.turn_on
+                target:
+                  entity_id: !input dim_scene
+            else:
+              # Short dropout: the vacancy dim ran, restore right away.
+              - if: "{{ 2 <= vacancy_len | float < ramp_up_wait | float }}"
+                then:
+                  - action: scene.turn_on
+                    target:
+                      entity_id: "{{ desired_scene }}"
+                    data:
+                      transition: !input ramp_up_transition
+
+      # Dim → bright after sustained presence. Only when this presence period
+      # started dim: the lights came on with it, or it followed a long vacancy.
+      - conditions: "{{ trigger.id == 'ramp_up_done' }}"
+        sequence:
+          - condition: template
+            value_template: >
+              {% set start = as_timestamp(trigger.to_state.last_changed) %}
+              {% set ns = namespace(t=0) %}
+              {% for e in linked_lights if is_state(e, 'on') %}
+                {% set ns.t = [ns.t, as_timestamp(states[e].last_changed)] | max %}
+              {% endfor %}
+              {{ ns.t >= start - 2 or vacancy_len | float >= ramp_up_wait | float }}
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ desired_scene }}"
+            data:
+              transition: !input ramp_up_transition
+
+      # HA restart: reconcile from current state.
+      - conditions: "{{ trigger.id == 'startup' }}"
+        sequence:
+          - if: "{{ not lights_on }}"
+            then:
+              - action: scene.turn_on
+                target:
+                  entity_id: !input dim_scene
+          - delay:
+              seconds: "{{ [0, ramp_up_wait | float - presence_age | float] | max }}"
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ desired_scene }}"
+            data:
+              transition: !input ramp_up_transition
+
+      # TV started / stopped (lights are on).
+      - conditions: "{{ trigger.id in ['tv_started', 'tv_stopped'] and tv_scene != '' }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ desired_scene }}"
+            data:
+              transition: !input ramp_up_transition
+
+      # Left the couch during playback.
+      - conditions: "{{ trigger.id == 'couch_left' }}"
+        sequence:
+          - action: media_player.media_pause
+            continue_on_error: true
+            target:
+              entity_id: "{{ tv_entity }}"
+          - if: "{{ tv_scene != '' }}"
+            then:
+              - action: scene.turn_on
+                target:
+                  entity_id: "{{ bright_scene }}"
+                data:
+                  transition: !input ramp_up_transition
+
+      # Day/night boundary: only in bright mode, not while still in the dim dwell.
+      - conditions: >
+          {{ trigger.id == 'day_switch' and not tv_mode
+             and presence_age | float >= ramp_up_wait | float }}
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ bright_scene }}"
+            data:
+              transition: !input day_night_transition
+
 mode: restart
 max_exceeded: silent

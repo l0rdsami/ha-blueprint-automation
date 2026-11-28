@@ -17,6 +17,12 @@ blueprint:
     The "Open Door" button survives Home Assistant restarts because it is
     handled by a dedicated event trigger, not a timed wait inside a run.
 
+    Optional startup recovery rechecks away locking after restore states are
+    available and uses a fresh auto-lock grace period. It is disabled by default
+    and never unlocks or opens the door at startup. Recovery and departure waits
+    run independently of immediate door controls and stop on an arrival or a
+    locked door.
+
     Requires a custom notify script called script.notify_people that accepts the
     same arguments as a standard Home Assistant notify service (message, title,
     data). Add it to your scripts.yaml or configure it via the UI before using
@@ -73,6 +79,23 @@ blueprint:
           step: 1
           unit_of_measurement: min
           mode: slider
+
+    restart_recovery_enabled:
+      name: Recheck Away Locking After Restart / Abwesenheitssperre nach Neustart prüfen
+      description: >
+        Optional: after Home Assistant starts, wait for all tracked people and
+        the lock to have valid states. If everyone is explicitly away and the
+        lock is unlocked, wait the configured Auto-Lock Delay again, then
+        recheck before locking. This starts a fresh grace period; it does not
+        preserve the original departure deadline. It never unlocks or opens
+        the door at startup. Disabled by default for existing installations.
+        | Optional: Nach einem HA-Neustart auf gültige Zustände warten. Sind
+        alle ausdrücklich abwesend und ist das Schloss unverriegelt, läuft
+        die eingestellte Sperrzeit erneut. Danach wird vor dem Sperren erneut
+        geprüft. Kein automatisches Entsperren/Öffnen beim Start.
+      default: false
+      selector:
+        boolean:
 
     night_mode_enabled:
       name: Enable Night Mode / Nachtmodus aktivieren
@@ -203,6 +226,7 @@ variables:
   lock_entity: !input lock_entity
   people: !input people
   lock_delay: !input lock_delay
+  restart_recovery_enabled: !input restart_recovery_enabled
   night_mode_enabled: !input night_mode_enabled
   night_mode_start: !input night_mode_start
   night_mode_end: !input night_mode_end
@@ -213,9 +237,11 @@ variables:
   lock_action_id: !input lock_action_id
 
 trigger:
-  # Split into two precise triggers so that intermediate GPS state changes
-  # (e.g. not_home → away → not_home) never fire the automation and cannot
-  # cancel a running lock-delay.
+  - platform: homeassistant
+    event: start
+    id: startup_away_recovery
+  # Only real arrivals and departures dispatch presence actions; intermediate
+  # GPS/zone transitions do not create another auto-lock countdown.
   - platform: state
     entity_id: !input people
     to: "home"
@@ -366,6 +392,65 @@ action:
         {% endif %}
 
   - choose:
+      # Startup can have incomplete restore states; never treat those as away.
+      # Only this opt-in branch uses strict recovery checks. Existing arrival,
+      # departure, night and authorized notification/NFC actions remain here.
+      # Parallel runs keep unrelated no-op events from discarding this wait.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'startup_away_recovery' and restart_recovery_enabled }}"
+        sequence:
+          - condition: template
+            value_template: "{{ people | length > 0 }}"
+          - wait_template: >-
+              {% set ns = namespace(ready=true, home=false) %}
+              {% for person in people %}
+                {% if is_state(person, 'home') %}
+                  {% set ns.home = true %}
+                {% endif %}
+                {% if states(person) in ['unknown', 'unavailable', ''] %}
+                  {% set ns.ready = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.home or (ns.ready and states(lock_entity) in ['locked', 'unlocked']) }}
+          - alias: Recover only with known away people and an unlocked lock
+            condition: template
+            value_template: >-
+              {% set ns = namespace(away=people | length > 0) %}
+              {% for person in people %}
+                {% if states(person) in ['home', 'unknown', 'unavailable', ''] %}
+                  {% set ns.away = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.away and is_state(lock_entity, 'unlocked') }}
+          # An arrival or a locked door cancels this countdown permanently,
+          # even if the person leaves or the door unlocks again before expiry.
+          - wait_for_trigger:
+              - platform: state
+                entity_id: !input people
+                to: "home"
+              - platform: state
+                entity_id: !input lock_entity
+                to: "locked"
+            timeout:
+              minutes: "{{ lock_delay | int }}"
+            continue_on_timeout: true
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+          - alias: Recheck current states after the recovery grace period
+            condition: template
+            value_template: >-
+              {% set ns = namespace(away=people | length > 0) %}
+              {% for person in people %}
+                {% if states(person) in ['home', 'unknown', 'unavailable', ''] %}
+                  {% set ns.away = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.away and is_state(lock_entity, 'unlocked') }}
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_entity }}"
+
       # ── Someone arrived home ─────────────────────────────────────────────
       - conditions:
           - condition: template
@@ -417,8 +502,20 @@ action:
               - condition: template
                 value_template: "{{ all_away | bool }}"
             then:
-              - delay:
+              # An arrival or a locked door cancels this countdown permanently,
+              # even if the person leaves or the door unlocks again before expiry.
+              - wait_for_trigger:
+                  - platform: state
+                    entity_id: !input people
+                    to: "home"
+                  - platform: state
+                    entity_id: !input lock_entity
+                    to: "locked"
+                timeout:
                   minutes: "{{ lock_delay | int }}"
+                continue_on_timeout: true
+              - condition: template
+                value_template: "{{ not wait.completed }}"
 
               # Re-check: only lock if everyone is still away after the delay
               - variables:
@@ -483,8 +580,8 @@ action:
             value_template: "{{ trigger.id == 'unlocked_at_night' }}"
         sequence:
           - if:
-              # Nobody home: just lock. This also covers a lock delay that was
-              # cancelled because this trigger restarted the automation.
+              # Nobody home: lock immediately under the existing night policy.
+              # The locked-state event also ends any pending away countdown.
               - condition: template
                 value_template: "{{ all_away | bool }}"
             then:
@@ -526,5 +623,8 @@ action:
               data:
                 tag: door_unlocked_night
 
-mode: restart
+# Long away waits must not queue arrivals or be restarted by unrelated events.
+# Each wait cancels itself on arrival/locked and rechecks before locking.
+mode: parallel
+max: 10
 max_exceeded: silent

@@ -17,6 +17,10 @@ blueprint:
     The "Open Door" button survives Home Assistant restarts because it is
     handled by a dedicated event trigger, not a timed wait inside a run.
 
+    Optional startup recovery rechecks away locking after restore states are
+    available and uses a fresh auto-lock grace period. It is disabled by default
+    and never unlocks or opens the door at startup.
+
     Requires a custom notify script called script.notify_people that accepts the
     same arguments as a standard Home Assistant notify service (message, title,
     data). Add it to your scripts.yaml or configure it via the UI before using
@@ -73,6 +77,23 @@ blueprint:
           step: 1
           unit_of_measurement: min
           mode: slider
+
+    restart_recovery_enabled:
+      name: Recheck Away Locking After Restart / Abwesenheitssperre nach Neustart prüfen
+      description: >
+        Optional: after Home Assistant starts, wait for all tracked people and
+        the lock to have valid states. If everyone is explicitly away and the
+        lock is unlocked, wait the configured Auto-Lock Delay again, then
+        recheck before locking. This starts a fresh grace period; it does not
+        preserve the original departure deadline. It never unlocks or opens
+        the door at startup. Disabled by default for existing installations.
+        | Optional: Nach einem HA-Neustart auf gültige Zustände warten. Sind
+        alle ausdrücklich abwesend und ist das Schloss unverriegelt, läuft
+        die eingestellte Sperrzeit erneut. Danach wird vor dem Sperren erneut
+        geprüft. Kein automatisches Entsperren/Öffnen beim Start.
+      default: false
+      selector:
+        boolean:
 
     night_mode_enabled:
       name: Enable Night Mode / Nachtmodus aktivieren
@@ -203,6 +224,7 @@ variables:
   lock_entity: !input lock_entity
   people: !input people
   lock_delay: !input lock_delay
+  restart_recovery_enabled: !input restart_recovery_enabled
   night_mode_enabled: !input night_mode_enabled
   night_mode_start: !input night_mode_start
   night_mode_end: !input night_mode_end
@@ -213,6 +235,9 @@ variables:
   lock_action_id: !input lock_action_id
 
 trigger:
+  - platform: homeassistant
+    event: start
+    id: startup_away_recovery
   # Split into two precise triggers so that intermediate GPS state changes
   # (e.g. not_home → away → not_home) never fire the automation and cannot
   # cancel a running lock-delay.
@@ -366,6 +391,49 @@ action:
         {% endif %}
 
   - choose:
+      # Startup can have incomplete restore states; never treat those as away.
+      # Only this opt-in branch uses strict recovery checks. Existing arrival,
+      # departure, night and authorized notification/NFC behavior stays intact.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'startup_away_recovery' and restart_recovery_enabled }}"
+        sequence:
+          - condition: template
+            value_template: "{{ people | length > 0 }}"
+          - wait_template: >-
+              {% set ns = namespace(ready=true) %}
+              {% for person in people %}
+                {% if states(person) in ['unknown', 'unavailable', ''] %}
+                  {% set ns.ready = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.ready and states(lock_entity) in ['locked', 'unlocked'] }}
+          - alias: Recover only with known away people and an unlocked lock
+            condition: template
+            value_template: >-
+              {% set ns = namespace(away=people | length > 0) %}
+              {% for person in people %}
+                {% if states(person) in ['home', 'unknown', 'unavailable', ''] %}
+                  {% set ns.away = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.away and is_state(lock_entity, 'unlocked') }}
+          - delay:
+              minutes: "{{ lock_delay | int }}"
+          - alias: Recheck current states after the recovery grace period
+            condition: template
+            value_template: >-
+              {% set ns = namespace(away=people | length > 0) %}
+              {% for person in people %}
+                {% if states(person) in ['home', 'unknown', 'unavailable', ''] %}
+                  {% set ns.away = false %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.away and is_state(lock_entity, 'unlocked') }}
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_entity }}"
+
       # ── Someone arrived home ─────────────────────────────────────────────
       - conditions:
           - condition: template
